@@ -1,0 +1,181 @@
+# tg-ai-userbot
+
+A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev)) — _not_ a @BotFather bot. It logs in as a real user account and will grow into an "AI Companion" (local LLMs / OpenRouter, queue system, memory) in later steps.
+
+## Current features
+
+- Logs in as a user account via MTProto.
+- **LLM chat with fallback**: non-command DMs are answered by a local llama.cpp model
+  (OpenAI-compatible `/v1/chat/completions`, no streaming). If the local server is offline
+  at startup, the bot falls back to [OpenRouter](https://openrouter.ai) (cloud) when an API
+  key is configured. The provider is chosen once, at startup.
+- **Conversation memory**: every user/AI message is stored in SQLite (Drizzle ORM).
+  The model is given a cache-friendly context window (see below).
+- Renders **Markdown** in replies (bold, code, links…).
+- Shows a live **"typing…"** status while the model generates (refreshed every ~5s).
+- Marks incoming messages as **read** on arrival.
+- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/reset`, `/clear`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`).
+- **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
+  and the bot's command output is deleted as soon as you send your next normal message —
+  so slash-command chatter never piles up next to the conversation.
+- **DMs only**: groups, supergroups and channels are ignored.
+- **Whitelist**: only configured Telegram user IDs are served; everyone else is ignored.
+- Ignores its own outgoing messages (no feedback loops).
+
+### Commands
+
+| Command           | Description                                                            |
+| ----------------- | --------------------------------------------------------------------- |
+| `/help`           | List available commands                                               |
+| `/status` (`/s`)  | Bot uptime/account + both LLM providers (state, model, vision, which is active) |
+| `/openrouter` (`/or`) | OpenRouter config, model context/vision, and free-tier usage/limits (`/key`) |
+| `/reset`          | Clear conversation memory (soft-delete — rows are flagged, not erased) |
+| `/clear`          | Erase the whole Telegram chat for both sides (revoke) **and** clear memory |
+| `/delete` (`/d`)  | Delete the last N messages for both sides — `/d` = 1, `/d N` = N; soft-flags memory like `/reset` |
+| `/reroll` (`/r`)  | Regenerate the last reply (re-runs the model without it) and edits the message in place |
+| `/update` (`/u`)  | Replace the last reply with your own text — `/u <new text>`; edits the message in place |
+| `/context` (`/c`) | Token usage (system prompt + window) vs. the model's max context, plus window re-anchoring state |
+| `/prompt` (`/p`)  | Show the prompt the LLM receives — system prompt + the first 3 and last 3 messages — as a code block |
+
+Single-letter shorthands: `/s`, `/d`, `/r`, `/u`, `/c`, `/p`. `/reroll` and `/update` rewrite the
+last reply **in place** — they overwrite that one record instead of appending, so memory and
+the Telegram message stay in sync without piling up edits.
+
+Commands keep the chat tidy: the `/command` message itself is deleted (for both sides)
+as soon as it's handled, and the bot's reply is deleted the moment you send your next
+normal (non-command) message. So checking `/context`, then replying, leaves no trace of
+either the command or its output.
+
+### Memory & the context window
+
+Messages are stored in SQLite. Rather than a 1-message sliding window (which would
+shift the prompt prefix on every message and force llama.cpp to re-evaluate the entire
+conversation each time), the window is **anchored and grows from 60 up to 79 messages,
+then snaps back to 60** every 20th message. Between snaps the older messages are
+byte-identical, so the llama.cpp KV cache is reused — roughly 19 cheap turns per 1 full
+recompute. `/reset` and `/delete` soft-delete via a `deleted` flag (nothing is physically
+removed).
+
+Before the window is sent to the model, **consecutive messages from the same role are
+merged into one** (their text joined by a blank line). Chat templates assume strictly
+alternating user/assistant turns, so two `user` (or two `assistant`) objects in a row can
+make the template throw or produce a malformed prompt — which happens naturally after
+`/delete`-ing a reply, or when several messages arrive back-to-back.
+
+The system prompt lives in a separate file: `prompts/system.txt`, and supports
+`{{tag}}` placeholders that are substituted per message:
+
+| Tag          | Substituted with                                   |
+| ------------ | -------------------------------------------------- |
+| `{{char}}`   | Character name (`CHAR_NAME` in `.env`, default `Sara`) |
+| `{{user}}`   | The Telegram user's display name (not username)    |
+| `{{date}}`   | Current date, e.g. `June 10, 2026`                 |
+| `{{day}}`    | Day of week, e.g. `Monday`                         |
+| `{{period}}` | Day period: `morning` / `afternoon` / `evening` / `night` |
+
+Unknown tags are left as-is. Because `{{date}}`/`{{day}}`/`{{period}}` change over time,
+they shift the cached prompt prefix at those boundaries (e.g. when the period flips) —
+expected, given they're meant to be dynamic.
+
+## Stack
+
+- Node.js + TypeScript (ESM)
+- [mtcute](https://mtcute.dev) (`@mtcute/node`) — MTProto client + SQLite session storage
+- Planned: better-sqlite3 + Drizzle ORM, LLM queue, memory management
+
+## Setup
+
+1. Install dependencies:
+   ```sh
+   npm install
+   ```
+2. Configure `.env` (already populated for this account). See `.env.example` for the keys:
+   - `API_ID`, `API_HASH` — from https://my.telegram.org
+   - `PHONE` — account phone in international format
+   - `WHITELIST` — comma-separated Telegram user IDs allowed to interact
+   - `SESSION_PATH` — where the SQLite session is stored (default `data/userbot.session`)
+   - `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` — the local llama.cpp server (primary)
+   - `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` — cloud fallback (leave the key blank to disable)
+   - `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, … — shared generation params (apply to either provider)
+
+## First login (one-time, interactive)
+
+Run the dedicated, watch-free login script (NOT `npm run dev` — watch mode intercepts
+keystrokes and breaks the code prompt):
+
+```sh
+npm run login
+```
+
+> **Run this in PowerShell or Windows Terminal, not Git Bash.** Git Bash uses MinTTY,
+> which Node does not treat as a real TTY, so interactive input is unreliable there.
+
+Telegram sends a login code to your Telegram app (or SMS); type it at the prompt. If the
+account has 2FA, you'll also be asked for the password.
+
+```
+Enter the login code: 12345
+Enter your 2FA password: ********   # only if 2FA is enabled
+```
+
+After a successful login the session is saved to `data/userbot.session`, and subsequent
+runs (`npm run dev` / `npm run start`) connect without prompting.
+
+## Scripts
+
+| Script          | Description                                  |
+| --------------- | -------------------------------------------- |
+| `npm run dev`   | Run with `tsx` + watch (auto-reload on edit) |
+| `npm run start` | Run once with `tsx` (no watch)               |
+| `npm run build` | Compile TypeScript to `dist/`                |
+| `npm run serve` | Run the compiled build from `dist/`          |
+| `npm run db:generate` | Generate a new Drizzle migration after editing `src/db/schema.ts` |
+
+Migrations in `./drizzle` are applied automatically at startup.
+
+## Project layout
+
+```
+src/
+  index.ts      Entry point: client setup, message handling, login, shutdown
+  config.ts     Env loading, validation, whitelist, LLM + DB settings
+  commands.ts   Command registry + parser (/help, /status, /openrouter, /reroll, …)
+  llm.ts        Provider facade: picks a backend at startup, re-exports the chat API
+  providers/
+    types.ts    Shared message helpers + provider interface + OpenAI-compatible call
+    llamacpp.ts Local llama.cpp backend (chat, vision, exact token count, max ctx)
+    openrouter.ts OpenRouter backend (chat, vision, /key usage, estimated tokens)
+  prompt.ts     System prompt loading + {{tag}} templating
+  format.ts     Model-output → Telegram Markdown rendering
+  typing.ts     "typing…" status helper
+  memory.ts     Conversation memory + cache-friendly context windowing
+  db/
+    schema.ts   Drizzle schema (messages table)
+    index.ts    SQLite connection + migrations
+  logger.ts     Timestamped logger
+prompts/
+  system.txt    System prompt (rough, editable)
+drizzle/        Generated SQL migrations (committed)
+data/           SQLite session + memory DB (git-ignored)
+```
+
+## Adding a command
+
+Register it in `src/commands.ts`:
+
+```ts
+register({
+  name: 'ping',
+  description: 'Reply with pong',
+  handler: async ({ client, msg }) => {
+    await client.replyText(msg, 'pong');
+  },
+});
+```
+
+It is automatically picked up by `/help` and the router.
+
+## Notes
+
+- `.env`, `data/`, and `*.session` files are git-ignored — never commit credentials or sessions.
+- This is a userbot: automating a user account is against Telegram's ToS if abused. Use responsibly on your own account.

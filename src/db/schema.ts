@@ -1,0 +1,105 @@
+import { sql } from 'drizzle-orm';
+import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+
+/**
+ * Conversation memory. Every user message and AI reply is stored as one row.
+ * Deletion is soft (the `deleted` flag) — `/reset` flags rows instead of removing them.
+ */
+export const messages = sqliteTable(
+  'messages',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Telegram chat (peer) id the message belongs to. */
+    chatId: integer('chat_id').notNull(),
+    role: text('role', { enum: ['user', 'assistant'] }).notNull(),
+    content: text('content').notNull(),
+    /**
+     * Telegram message id of the sent message, when known. Stored for assistant
+     * replies so `/reroll` and `/update` can edit the original message in place.
+     */
+    tgMessageId: integer('tg_message_id'),
+    /**
+     * Which backend generated this reply (assistant rows only; NULL for user rows and
+     * for rows written before provenance tracking existed). See {@link LlmProvider}.
+     */
+    provider: text('provider', { enum: ['llamacpp', 'openrouter'] }),
+    /**
+     * The model that actually served the reply, taken from the completion response
+     * (not the configured slug — OpenRouter may route `:free` requests to a different
+     * served model, and a local server may have a different model loaded). NULL for
+     * user rows / pre-tracking rows.
+     */
+    model: text('model'),
+    /** Soft-delete flag. Set by /reset; excluded from the context window. */
+    deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
+    /** Epoch milliseconds. */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_messages_chat').on(t.chatId, t.deleted, t.id)],
+);
+
+export type MessageRow = typeof messages.$inferSelect;
+
+/**
+ * Image attachments for a message. Each row is one image's text description (caption),
+ * produced by a vision pass over the photo at receive time. Captions are kept here —
+ * not baked into `messages.content` — and injected as `[image N: …]` blocks only when
+ * the context window is built, so the stored user text stays clean and the captions can
+ * later be trimmed from old turns without rewriting message rows.
+ *
+ * `idx` orders multiple images within one message (0-based). One image per message today;
+ * the column is here so albums (2+ photos in one turn) drop in without a schema change.
+ */
+export const attachments = sqliteTable(
+  'attachments',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Owning message row (messages.id, NOT the Telegram message id). */
+    messageId: integer('message_id')
+      .notNull()
+      .references(() => messages.id),
+    /** Position of this image within its message, 0-based. */
+    idx: integer('idx').notNull().default(0),
+    /** Concise text description of the image, used in place of the pixels. */
+    caption: text('caption').notNull(),
+  },
+  (t) => [index('idx_attachments_message').on(t.messageId)],
+);
+
+export type AttachmentRow = typeof attachments.$inferSelect;
+
+/**
+ * Web-search results for a message. Each row is one search (query + distilled summary)
+ * the model ran while answering. Like {@link attachments}, the summary is kept here —
+ * not baked into `messages.content` — and injected as a `[web search "…": …]` block when
+ * the context window is built, placed *after* the user's text (a search is a response to
+ * the question, unlike an image which precedes it in Telegram's UI).
+ *
+ * `idx` orders multiple searches within one turn (0-based) — the model may search more
+ * than once per message (capped) when the first result isn't enough.
+ */
+export const searches = sqliteTable(
+  'searches',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Owning message row (messages.id) — the user turn that triggered the search. */
+    messageId: integer('message_id')
+      .notNull()
+      .references(() => messages.id),
+    /** Position of this search within its message, 0-based. */
+    idx: integer('idx').notNull().default(0),
+    /** The query the model asked for. */
+    query: text('query').notNull(),
+    /** Distilled, model-readable result text (Tavily answer + compact sources). */
+    summary: text('summary').notNull(),
+    /** Epoch milliseconds. */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_searches_message').on(t.messageId)],
+);
+
+export type SearchRow = typeof searches.$inferSelect;

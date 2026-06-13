@@ -1,0 +1,1 @@
+ALTER TABLE `messages` ADD `tg_message_id` integer;

@@ -1,0 +1,238 @@
+/**
+ * OpenRouter provider — the cloud fallback used when the local llama.cpp server is
+ * offline. OpenRouter is OpenAI-compatible, so the chat/caption calls reuse the shared
+ * helper; the extras are Bearer auth + ranking headers, per-model metadata from /models
+ * (context length, vision), key usage/limits from /key, and a tokenizer-based estimate
+ * for token counting (OpenRouter has no tokenize endpoint).
+ */
+import { encode } from 'gpt-tokenizer';
+import { config } from '../config.js';
+import {
+  type LlmProvider,
+  type ProviderStatus,
+  captionMessages,
+  openaiChatCompletion,
+  withSystem,
+} from './types.js';
+
+const cfg = config.llm.openrouter;
+const gen = config.llm;
+const CHAT_URL = `${cfg.baseUrl}/chat/completions`;
+
+/**
+ * Upstream provider routing (the `provider` request field). `order` lists preferred
+ * providers tried first in sequence; with `allow_fallbacks` true, OpenRouter then routes
+ * to the rest if none are available. Returns undefined when no preference is configured,
+ * so we send no `provider` field and get OpenRouter's default routing. Built once — config
+ * is static.
+ */
+function buildProviderRouting(): Record<string, unknown> | undefined {
+  const hasPreference = cfg.providerOrder.length > 0 || Boolean(cfg.providerSort);
+  if (!hasPreference) return undefined;
+  const routing: Record<string, unknown> = { allow_fallbacks: cfg.allowFallbacks };
+  if (cfg.providerOrder.length) routing.order = cfg.providerOrder;
+  if (cfg.providerSort) routing.sort = cfg.providerSort;
+  return routing;
+}
+
+const PROVIDER_ROUTING = buildProviderRouting();
+
+/**
+ * Extra request body for every OpenRouter call:
+ * - `reasoning.enabled: false` — OpenRouter has no llama `enable_thinking` kwarg; this is
+ *   its unified way to turn off chain-of-thought, keeping replies in the standard `content`
+ *   field and not burning `max_tokens` on hidden reasoning.
+ * - `provider` — upstream routing preference (omitted when none is configured).
+ */
+const EXTRA_BODY: Record<string, unknown> = {
+  reasoning: { enabled: false },
+  ...(PROVIDER_ROUTING ? { provider: PROVIDER_ROUTING } : {}),
+};
+
+/** Headers for every OpenRouter call: Bearer auth plus optional app-ranking headers. */
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Authorization: `Bearer ${cfg.apiKey ?? ''}` };
+  if (cfg.appUrl) headers['HTTP-Referer'] = cfg.appUrl;
+  if (cfg.appName) headers['X-Title'] = cfg.appName;
+  return headers;
+}
+
+// ---- Cached metadata lookups ----
+// status()/getVisionSupport are hit per photo and per /status; cache to avoid hammering.
+
+/**
+ * Usage/limits as returned by GET /key (`.data`). Note: the API's `rate_limit` field is
+ * deprecated (returns `requests: -1`), so it's intentionally not modelled here.
+ */
+export interface KeyInfo {
+  label?: string;
+  /** Credits spent so far, all-time (USD). */
+  usage?: number;
+  /** Credits spent today / this week / this month (USD). */
+  usage_daily?: number;
+  usage_weekly?: number;
+  usage_monthly?: number;
+  /** Hard credit limit (USD), or null for none. */
+  limit?: number | null;
+  /** Remaining credits (USD), or null when there's no limit. */
+  limit_remaining?: number | null;
+  is_free_tier?: boolean;
+}
+
+/** Per-model facts pulled from GET /models for the configured slug. */
+export interface ModelInfo {
+  contextLength: number | null;
+  vision: boolean;
+  /** True when every price field is "0" (a free model). */
+  free: boolean;
+}
+
+let keyCache: { at: number; info: KeyInfo | null } | null = null;
+let modelCache: { at: number; info: ModelInfo | null } | null = null;
+const KEY_TTL_MS = 60_000;
+const MODELS_TTL_MS = 5 * 60_000;
+
+async function fetchKeyInfo(): Promise<KeyInfo | null> {
+  if (!cfg.apiKey) return null;
+  if (keyCache && Date.now() - keyCache.at < KEY_TTL_MS) return keyCache.info;
+  try {
+    const res = await fetch(`${cfg.baseUrl}/key`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(5000),
+    });
+    const info = res.ok ? ((await res.json()) as { data?: KeyInfo }).data ?? null : null;
+    keyCache = { at: Date.now(), info };
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchModelInfo(): Promise<ModelInfo | null> {
+  if (!cfg.apiKey) return null;
+  if (modelCache && Date.now() - modelCache.at < MODELS_TTL_MS) return modelCache.info;
+  try {
+    const res = await fetch(`${cfg.baseUrl}/models`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      modelCache = { at: Date.now(), info: null };
+      return null;
+    }
+    const data = (await res.json()) as {
+      data?: {
+        id?: string;
+        context_length?: number;
+        architecture?: { input_modalities?: string[] };
+        top_provider?: { context_length?: number };
+        pricing?: Record<string, string>;
+      }[];
+    };
+    const m = data.data?.find((x) => x.id === cfg.model);
+    const info: ModelInfo | null = m
+      ? {
+          contextLength: m.context_length ?? m.top_provider?.context_length ?? null,
+          vision: Array.isArray(m.architecture?.input_modalities)
+            ? m.architecture.input_modalities.includes('image')
+            : false,
+          free: m.pricing
+            ? Object.values(m.pricing).every((p) => Number(p) === 0)
+            : cfg.model.endsWith(':free'),
+        }
+      : null;
+    modelCache = { at: Date.now(), info };
+    return info;
+  } catch {
+    return null;
+  }
+}
+
+export const openRouter: LlmProvider = {
+  id: 'openrouter',
+  label: 'OpenRouter (cloud)',
+
+  isConfigured: () => Boolean(cfg.apiKey),
+
+  async chat(systemPrompt, history) {
+    return openaiChatCompletion({
+      url: CHAT_URL,
+      headers: authHeaders(),
+      model: cfg.model,
+      messages: withSystem(systemPrompt, history),
+      temperature: gen.temperature,
+      maxTokens: gen.maxTokens,
+      timeoutMs: gen.timeoutMs,
+      extraBody: EXTRA_BODY,
+      label: 'OpenRouter',
+    });
+  },
+
+  async describeImage(base64, mime = 'image/jpeg') {
+    const { content: caption } = await openaiChatCompletion({
+      url: CHAT_URL,
+      headers: authHeaders(),
+      model: cfg.model,
+      messages: captionMessages(base64, mime),
+      temperature: gen.captionTemperature,
+      maxTokens: gen.captionMaxTokens,
+      timeoutMs: gen.timeoutMs,
+      extraBody: EXTRA_BODY,
+      label: 'OpenRouter caption',
+    });
+    return caption.replace(/\s*\n+\s*/g, ' ');
+  },
+
+  async status(): Promise<ProviderStatus> {
+    if (!cfg.apiKey) return { online: false, model: null, vision: false };
+    // Reachable + key valid ⇒ online. Vision comes from the model's metadata.
+    const [key, model] = await Promise.all([fetchKeyInfo(), fetchModelInfo()]);
+    return {
+      online: key !== null,
+      model: key !== null ? cfg.model : null,
+      vision: model?.vision ?? false,
+    };
+  },
+
+  async getMaxContext(): Promise<number | null> {
+    return (await fetchModelInfo())?.contextLength ?? null;
+  },
+
+  /**
+   * Approximate prompt-token count. OpenRouter has no tokenize endpoint, so this uses a
+   * GPT tokenizer (gpt-tokenizer) as a proxy — not exact for Gemma's tokenizer, but close
+   * enough for a usage gauge. The `+4` per message is the usual role/format overhead.
+   */
+  async countContextTokens(systemPrompt, history): Promise<number> {
+    const messages = withSystem(systemPrompt, history);
+    let tokens = 0;
+    for (const m of messages) tokens += encode(m.content).length + 4;
+    return tokens;
+  },
+};
+
+/** The active upstream routing preference, as configured. */
+export interface RoutingInfo {
+  order: string[];
+  sort: string | undefined;
+  allowFallbacks: boolean;
+}
+
+/** Combined snapshot for the `/openrouter` command. Never throws. */
+export async function getOpenRouterInfo(): Promise<{
+  configured: boolean;
+  model: string;
+  key: KeyInfo | null;
+  modelInfo: ModelInfo | null;
+  routing: RoutingInfo;
+}> {
+  const routing: RoutingInfo = {
+    order: cfg.providerOrder,
+    sort: cfg.providerSort,
+    allowFallbacks: cfg.allowFallbacks,
+  };
+  const configured = Boolean(cfg.apiKey);
+  if (!configured) return { configured, model: cfg.model, key: null, modelInfo: null, routing };
+  const [key, modelInfo] = await Promise.all([fetchKeyInfo(), fetchModelInfo()]);
+  return { configured, model: cfg.model, key, modelInfo, routing };
+}
