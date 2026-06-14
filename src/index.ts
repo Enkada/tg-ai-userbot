@@ -1,4 +1,4 @@
-import { TelegramClient, type InputText, type Message } from '@mtcute/node';
+import { TelegramClient, proxyTransportFromUrl, type InputText, type Message } from '@mtcute/node';
 import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
 import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
@@ -33,6 +33,8 @@ const client = new TelegramClient({
   apiId: config.apiId,
   apiHash: config.apiHash,
   storage: config.sessionPath,
+  // Route MTProto through a proxy when configured (needed where Telegram's DCs are blocked).
+  ...(config.proxyUrl ? { transport: proxyTransportFromUrl(config.proxyUrl) } : {}),
 });
 
 /**
@@ -175,6 +177,12 @@ async function main(): Promise<void> {
   log.info('Starting UserBot...');
 
   runMigrations();
+
+  if (config.proxyUrl) {
+    // Log the proxy host without leaking any user:pass credentials in the URL.
+    const host = config.proxyUrl.replace(/^[a-z0-9+.-]+:\/\/(?:[^@/]*@)?/i, '').split(/[/?]/)[0];
+    log.info(`Connecting through proxy: ${host}`);
+  }
 
   // Pick the LLM backend up front: local llama.cpp if reachable, else OpenRouter.
   await initProvider();

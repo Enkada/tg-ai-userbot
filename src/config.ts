@@ -81,6 +81,14 @@ export const config = {
   whitelist: new Set(parseIdList(process.env.WHITELIST)),
   sessionPath: process.env.SESSION_PATH ?? 'data/userbot.session',
   dbPath: process.env.DB_PATH ?? 'data/userbot.db',
+  /**
+   * Optional proxy for the MTProto connection, used where Telegram's data centres are
+   * blocked at the network level (e.g. a Russian host). Accepts any URL understood by
+   * mtcute's `proxyTransportFromUrl`: `socks5://user:pass@host:port`,
+   * `http://user:pass@host:port`, or an MTProxy `https://t.me/proxy?server=…&port=…&secret=…`.
+   * Unset ⇒ connect directly. The proxy only sees encrypted MTProto, never message contents.
+   */
+  proxyUrl: process.env.PROXY_URL?.trim() || undefined,
   character: {
     /** Name substituted for the {{char}} tag in the system prompt. */
     name: process.env.CHAR_NAME ?? 'Sara',
