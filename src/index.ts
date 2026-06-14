@@ -2,21 +2,16 @@ import { TelegramClient, type InputText, type Message } from '@mtcute/node';
 import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
 import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
-import {
-  activeProviderId,
-  chat,
-  describeImage,
-  getVisionSupport,
-  initProvider,
-  type ChatResult,
-} from './llm.js';
+import { activeProviderId, describeImage, getVisionSupport, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
-import { getWindow, saveAttachment, saveMessage, saveSearch } from './memory.js';
-import { isSearchConfigured, webSearch } from './search.js';
-import { finalizeReply, parseToolCall } from './tools.js';
+import { saveAttachment, saveMessage } from './memory.js';
+import { generateReply, persistedSearchStrategy } from './generate.js';
+import { finalizeReply } from './tools.js';
 import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
+import { enqueue } from './queue.js';
+import { onUserActivity, startProactiveLoop } from './proactive.js';
 
 const log = createLogger('bot');
 const startedAt = Date.now();
@@ -32,29 +27,6 @@ function trackCommandOutput(chatId: number, messageId: number): void {
   const ids = pendingCommandOutputs.get(chatId);
   if (ids) ids.push(messageId);
   else pendingCommandOutputs.set(chatId, [messageId]);
-}
-
-/**
- * Per-chat promise chain. All stateful handling for a chat runs through here so messages
- * are processed strictly in arrival order, one at a time — a second message waits for the
- * first reply to be fully generated and saved before its own LLM round-trip starts. This
- * keeps the stored history cleanly alternating (user → assistant → user → …) and, because
- * each task's `getWindow` runs only after the previous reply is persisted, every request
- * ends on a user turn. Without it, two quick messages race: overlapping LLM calls, two
- * adjacent `user` rows, and nondeterministic reply order.
- */
-const chatQueues = new Map<number, Promise<void>>();
-
-function enqueue(chatId: number, task: () => Promise<void>): void {
-  const prev = chatQueues.get(chatId) ?? Promise.resolve();
-  // Run the next task regardless of whether the previous one settled or threw, so one
-  // failure never wedges the chat. Errors are logged inside `task`.
-  const next = prev.then(task, task);
-  chatQueues.set(chatId, next);
-  next.finally(() => {
-    // Drop the entry once the chain has fully drained, so idle chats don't leak memory.
-    if (chatQueues.get(chatId) === next) chatQueues.delete(chatId);
-  });
 }
 
 const client = new TelegramClient({
@@ -89,44 +61,6 @@ function handleMessage(msg: Message, selfName: string): void {
   );
 }
 
-/**
- * Generates a reply, running the model's `web_search` tool calls in a loop. The first
- * `chat` is the normal reply; if its output is a `<tool_call>`, we run the search, attach
- * the distilled result to the user's message row (so it enters the window), and ask the
- * model again — now grounded. Repeats until the model answers in prose or the per-turn
- * cap is hit (anti-loop: a model that keeps emitting calls can't spin forever). When
- * search is unconfigured there are no tools, so this is a single `chat` call.
- */
-async function generateWithTools(
-  chatId: number,
-  systemPrompt: string,
-  userRowId: number,
-): Promise<ChatResult> {
-  let result = await chat(systemPrompt, getWindow(chatId));
-  if (!isSearchConfigured()) return result;
-
-  const max = config.tavily.maxSearchesPerTurn;
-  for (let searchCount = 0; searchCount < max; searchCount++) {
-    const call = parseToolCall(result.content);
-    if (!call || call.name !== 'web_search') break;
-    const query = String(call.arguments.query ?? '').trim();
-    if (!query) break;
-
-    let summary: string;
-    try {
-      summary = await webSearch(query);
-      log.info(`Web search ${searchCount + 1}/${max} for chat ${chatId}: ${query}`);
-    } catch (err) {
-      log.error('Web search failed:', err);
-      summary = 'search failed — no results available right now.';
-    }
-    // Attach to the user turn; the rebuilt window injects it as a [web search …] block.
-    saveSearch(userRowId, searchCount, query, summary);
-    result = await chat(systemPrompt, getWindow(chatId));
-  }
-  return result;
-}
-
 /** Processes one message to completion (command routing or a full LLM round-trip). */
 async function processMessage(msg: Message, senderId: number, selfName: string): Promise<void> {
   // Mark the sender's message as read as soon as we start handling it.
@@ -143,6 +77,9 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   const chatId = msg.chat.id;
   // Display name of the user we're talking to, for the {{user}} prompt tag.
   const userName = msg.sender.displayName;
+  // The user is active: reset the proactive silence timer (and cache their name). Covers
+  // commands too — any interaction counts as "they're here", so don't reach out right now.
+  onUserActivity(chatId, userName);
   // A photo's caption is never treated as a slash command — commands are text-only.
   const parsed = photo ? null : parseCommand(text);
 
@@ -218,7 +155,7 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       }
       // Build the cache-friendly window (now including this message + caption) and reply,
       // running any web_search tool calls the model makes before it answers.
-      return generateWithTools(chatId, systemPrompt, userRowId);
+      return generateReply(systemPrompt, persistedSearchStrategy(chatId, userRowId), `chat ${chatId}`);
     });
     // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat.
     const replyText = finalizeReply(reply.content);
@@ -251,6 +188,9 @@ async function main(): Promise<void> {
   client.onNewMessage.add((msg) => {
     handleMessage(msg, selfName);
   });
+
+  // Start the proactive scheduler (no-op unless PROACTIVE_ENABLED=true).
+  if (config.proactive.enabled) startProactiveLoop(client);
 
   log.info('UserBot is online and listening for messages.');
 }

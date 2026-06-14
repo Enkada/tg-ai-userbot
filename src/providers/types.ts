@@ -68,6 +68,15 @@ export interface LlmProvider {
   isConfigured(): boolean;
   /** Single chat completion (no streaming). `systemPrompt` is already rendered. */
   chat(systemPrompt: string, history: ChatMessage[]): Promise<ChatResult>;
+  /**
+   * Raw completion over an explicit message array — sent as-is, with no system-prompt
+   * prepend or consecutive-role merge. For control-flow calls (e.g. the proactive yes/no
+   * gate) that need a custom prompt shape and a tiny token budget, not the persona path.
+   */
+  complete(
+    messages: ChatMessage[],
+    opts: { maxTokens: number; temperature: number },
+  ): Promise<ChatResult>;
   /** One vision pass over an image, returning a concise one-line caption. */
   describeImage(base64: string, mime?: string): Promise<string>;
   /** Reachability + current model + vision. Never throws. */

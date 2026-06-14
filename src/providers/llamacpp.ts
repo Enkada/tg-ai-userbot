@@ -61,6 +61,19 @@ export const llamaCpp: LlmProvider = {
     });
   },
 
+  async complete(messages, opts) {
+    return openaiChatCompletion({
+      url: CHAT_URL,
+      model: cfg.model,
+      messages,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
+      timeoutMs: gen.timeoutMs,
+      extraBody: REASONING_OFF,
+      label: 'Gate',
+    });
+  },
+
   async describeImage(base64, mime = 'image/jpeg') {
     const { content: caption } = await openaiChatCompletion({
       url: CHAT_URL,

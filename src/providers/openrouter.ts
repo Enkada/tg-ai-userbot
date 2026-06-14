@@ -168,6 +168,20 @@ export const openRouter: LlmProvider = {
     });
   },
 
+  async complete(messages, opts) {
+    return openaiChatCompletion({
+      url: CHAT_URL,
+      headers: authHeaders(),
+      model: cfg.model,
+      messages,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
+      timeoutMs: gen.timeoutMs,
+      extraBody: EXTRA_BODY,
+      label: 'OpenRouter gate',
+    });
+  },
+
   async describeImage(base64, mime = 'image/jpeg') {
     const { content: caption } = await openaiChatCompletion({
       url: CHAT_URL,

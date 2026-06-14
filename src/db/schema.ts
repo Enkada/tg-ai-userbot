@@ -30,6 +30,12 @@ export const messages = sqliteTable(
      * user rows / pre-tracking rows.
      */
     model: text('model'),
+    /**
+     * True when this assistant reply was sent unprompted by the proactive scheduler
+     * (the bot initiating). NULL/false for user rows and ordinary reactive replies.
+     * Drives the "one outstanding proactive message" guard.
+     */
+    proactive: integer('proactive', { mode: 'boolean' }).notNull().default(false),
     /** Soft-delete flag. Set by /reset; excluded from the context window. */
     deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
     /** Epoch milliseconds. */
@@ -103,3 +109,28 @@ export const searches = sqliteTable(
 );
 
 export type SearchRow = typeof searches.$inferSelect;
+
+/**
+ * Per-chat scheduling state for proactive messaging. One row per chat. Kept in the DB
+ * (not in process memory) so the schedule survives restarts — the scheduler reasons from
+ * `dueAt`/`isMorning` rather than from in-RAM timers that reset on every reboot.
+ */
+export const proactiveState = sqliteTable('proactive_state', {
+  /** Telegram chat (peer) id — the same key as {@link messages.chatId}. */
+  chatId: integer('chat_id').primaryKey(),
+  /**
+   * Epoch ms when the next proactive check becomes due. NULL means "unarmed" — the next
+   * daytime tick arms the morning opener; a night tick resets it to NULL so morning re-arms.
+   */
+  dueAt: integer('due_at'),
+  /** Whether the next due check should use the "good morning" framing rather than daytime. */
+  isMorning: integer('is_morning', { mode: 'boolean' }).notNull().default(false),
+  /** Cached display name of the peer, for the {{user}} tag when generating an opener. */
+  userName: text('user_name'),
+  /** Epoch ms of the last update. */
+  updatedAt: integer('updated_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type ProactiveStateRow = typeof proactiveState.$inferSelect;

@@ -1,5 +1,10 @@
 import 'dotenv/config';
 
+// Lock the process timezone before any `Date` is constructed, so the {{period}} tag and
+// the proactive scheduler agree on "what hour it is" regardless of the host's timezone.
+// Node re-reads process.env.TZ on assignment, so setting it here is enough.
+process.env.TZ = process.env.TIMEZONE?.trim() || 'Europe/Moscow';
+
 /**
  * Reads a required environment variable, throwing a clear error if it is missing.
  */
@@ -142,6 +147,28 @@ export const config = {
     maxSearchesPerTurn: numberEnv('TAVILY_MAX_SEARCHES', 3),
     /** Per-request timeout (ms). */
     timeoutMs: numberEnv('TAVILY_TIMEOUT_MS', 15_000),
+  },
+  // ---- Proactive messaging — the bot initiating conversation on its own ----
+  proactive: {
+    /** Master switch. When false, the scheduler never starts (bot stays purely reactive). */
+    enabled: boolEnv('PROACTIVE_ENABLED', false),
+    /** Active window (local hours): the bot may only initiate while start ≤ hour < end. */
+    windowStartHour: numberEnv('PROACTIVE_WINDOW_START', 7),
+    windowEndHour: numberEnv('PROACTIVE_WINDOW_END', 23),
+    /** The good-morning opener fires once at a random time within this hour range. */
+    morningStartHour: numberEnv('PROACTIVE_MORNING_START', 7),
+    morningEndHour: numberEnv('PROACTIVE_MORNING_END', 8),
+    /** Daytime silence: re-check this many minutes (random in range) after the last activity. */
+    silenceMinMinutes: numberEnv('PROACTIVE_SILENCE_MIN', 45),
+    silenceMaxMinutes: numberEnv('PROACTIVE_SILENCE_MAX', 90),
+    /** How often the scheduler evaluates each chat (ms). */
+    tickMs: numberEnv('PROACTIVE_TICK_MS', 600_000),
+    /** Max tokens for the yes/no gate completion (it answers a single word). */
+    gateMaxTokens: numberEnv('PROACTIVE_GATE_MAX_TOKENS', 8),
+    /** How many recent messages the gate sees when judging. */
+    gateTranscriptDepth: numberEnv('PROACTIVE_GATE_DEPTH', 20),
+    /** Path to the neutral evaluator prompt, relative to the project root. */
+    gatePromptPath: process.env.PROACTIVE_GATE_PROMPT_PATH ?? 'prompts/proactive-gate.txt',
   },
 } as const;
 

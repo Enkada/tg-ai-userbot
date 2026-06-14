@@ -47,6 +47,12 @@ export function activeProviderId(): ProviderId {
 export const chat = (systemPrompt: string, history: ChatMessage[]): Promise<ChatResult> =>
   active.chat(systemPrompt, history);
 
+/** Raw completion over an explicit message array (the proactive gate's control-flow call). */
+export const complete = (
+  messages: ChatMessage[],
+  opts: { maxTokens: number; temperature: number },
+): Promise<ChatResult> => active.complete(messages, opts);
+
 export const describeImage = (base64: string, mime?: string): Promise<string> =>
   active.describeImage(base64, mime);
 

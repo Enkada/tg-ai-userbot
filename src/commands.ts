@@ -26,6 +26,7 @@ import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
 import { finalizeReply } from './tools.js';
+import { getProactiveStatus, runProactiveNow } from './proactive.js';
 
 /** Display labels for chat roles, used by /prompt. */
 const ROLE_LABELS: Record<'system' | 'user' | 'assistant', string> = {
@@ -363,6 +364,21 @@ register({
     } catch {
       await reply('Could not edit the message.');
     }
+  },
+});
+
+register({
+  name: 'proactive',
+  aliases: ['pro'],
+  description: 'Show the proactive schedule; /proactive test forces a gate + send now',
+  handler: async ({ client, reply, chatId, userName, args }) => {
+    if (args[0]?.toLowerCase() === 'test') {
+      // The gate runs silently (no typing); sendProactive shows its own typing on YES.
+      const result = await runProactiveNow(client, chatId, userName);
+      await reply(md(`🛎️ **Proactive test**\n${result}`));
+      return;
+    }
+    await reply(md(`🛎️ **Proactive**\n${getProactiveStatus(chatId)}`));
   },
 });
 

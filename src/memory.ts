@@ -1,6 +1,7 @@
 import { and, asc, count, desc, eq, inArray } from 'drizzle-orm';
 import { db } from './db/index.js';
-import { attachments, messages, searches } from './db/schema.js';
+import { attachments, messages, proactiveState, searches } from './db/schema.js';
+import type { ProactiveStateRow } from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
 
@@ -45,6 +46,7 @@ export interface GenerationSource {
  * Appends a message to the conversation memory. `tgMessageId` is the Telegram id of
  * the sent message (stored for assistant replies so they can be edited later). `source`
  * records which provider/model generated an assistant reply (omit for user messages).
+ * `proactive` marks an assistant reply the bot sent unprompted (the initiating message).
  * Returns the new row's id, so image captions can be linked to it via {@link saveAttachment}.
  */
 export function saveMessage(
@@ -53,10 +55,19 @@ export function saveMessage(
   content: string,
   tgMessageId?: number,
   source?: GenerationSource,
+  proactive = false,
 ): number {
   const row = db
     .insert(messages)
-    .values({ chatId, role, content, tgMessageId, provider: source?.provider, model: source?.model })
+    .values({
+      chatId,
+      role,
+      content,
+      tgMessageId,
+      provider: source?.provider,
+      model: source?.model,
+      proactive,
+    })
     .returning({ id: messages.id })
     .get();
   return row.id;
@@ -121,6 +132,71 @@ export function getLastRole(chatId: number): 'user' | 'assistant' | null {
   return row?.role ?? null;
 }
 
+/** Role + proactive flag of the latest non-deleted message in a chat, or null if empty. */
+export interface LastMessageMeta {
+  role: 'user' | 'assistant';
+  /** True when that last message is an unprompted (proactive) assistant reply. */
+  proactive: boolean;
+}
+
+/**
+ * Returns the role + proactive flag of the most recent non-deleted message. The proactive
+ * scheduler uses this as its "one outstanding message" guard: if the last message is an
+ * unanswered proactive reply, it won't send another until the user replies.
+ */
+export function getLastMessageMeta(chatId: number): LastMessageMeta | null {
+  const row = db
+    .select({ role: messages.role, proactive: messages.proactive })
+    .from(messages)
+    .where(and(eq(messages.chatId, chatId), eq(messages.deleted, false)))
+    .orderBy(desc(messages.id))
+    .limit(1)
+    .get();
+  return row ?? null;
+}
+
+/** Epoch ms of the latest non-deleted *user* message in a chat, or null if there is none. */
+export function getLastUserMessageAt(chatId: number): number | null {
+  const row = db
+    .select({ at: messages.createdAt })
+    .from(messages)
+    .where(
+      and(eq(messages.chatId, chatId), eq(messages.role, 'user'), eq(messages.deleted, false)),
+    )
+    .orderBy(desc(messages.id))
+    .limit(1)
+    .get();
+  return row?.at ?? null;
+}
+
+/** Fields of a chat's proactive schedule that callers may update. */
+export interface ProactivePatch {
+  /** Epoch ms the next check is due, or null to "unarm" (re-arm at next morning). */
+  dueAt?: number | null;
+  isMorning?: boolean;
+  userName?: string | null;
+}
+
+/** Current proactive schedule for a chat, or null if none has been recorded yet. */
+export function getProactiveState(chatId: number): ProactiveStateRow | null {
+  const row = db
+    .select()
+    .from(proactiveState)
+    .where(eq(proactiveState.chatId, chatId))
+    .limit(1)
+    .get();
+  return row ?? null;
+}
+
+/** Inserts or updates a chat's proactive schedule, touching only the provided fields. */
+export function upsertProactiveState(chatId: number, patch: ProactivePatch): void {
+  const now = Date.now();
+  db.insert(proactiveState)
+    .values({ chatId, ...patch, updatedAt: now })
+    .onConflictDoUpdate({ target: proactiveState.chatId, set: { ...patch, updatedAt: now } })
+    .run();
+}
+
 /**
  * Overrides the content of an existing message row in place (no new row is created).
  * The `source` argument controls provenance:
@@ -154,7 +230,7 @@ function withCaptions(content: string, captions: string[]): string {
 }
 
 /** One search's query + distilled summary, for injecting into the window. */
-interface SearchEntry {
+export interface SearchEntry {
   query: string;
   summary: string;
 }
@@ -162,9 +238,10 @@ interface SearchEntry {
 /**
  * Appends a message's web-search results as `[web search "query": …]` block(s) *after*
  * its text — a search answers the question, so it follows it (unlike an image caption,
- * which precedes the text to mirror Telegram's UI order).
+ * which precedes the text to mirror Telegram's UI order). Exported so the proactive
+ * opener's in-memory tool loop renders search blocks in the exact same format.
  */
-function withSearches(content: string, results: SearchEntry[]): string {
+export function withSearches(content: string, results: SearchEntry[]): string {
   if (results.length === 0) return content;
   const blocks = results.map((r) => `[web search "${r.query}":\n${r.summary}]`).join('\n');
   return content ? `${content}\n${blocks}` : blocks;
