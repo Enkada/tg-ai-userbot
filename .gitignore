@@ -5,3 +5,5 @@ data/
 *.session-journal
 .env
 *.log
+# User-owned persona (created from prompts/persona.default.txt on first run)
+prompts/persona.txt

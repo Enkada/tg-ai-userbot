@@ -12,6 +12,9 @@
  * "treat your current-fact memory as unreliable" rule below, which is what made the
  * smaller model stop answering stale facts from memory in testing.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { config } from './config.js';
 import { isSearchConfigured } from './search.js';
 
 /** A tool the model may call via the pseudo protocol. */
@@ -40,28 +43,28 @@ export function availableTools(): ToolDef[] {
   return ALL_TOOLS.filter((t) => t.available());
 }
 
+/** The tool-protocol scaffold (search rule, call syntax, example) with a {{tools}} placeholder. */
+let toolsTemplate: string | undefined;
+
 /**
  * Renders the tool section appended to the system prompt: the search-decision rule, the
- * call syntax, a worked example, and the available tools. Kept terse on purpose (it's in
- * every prompt). Returns '' when no tool is available, so the prompt is unchanged then.
+ * call syntax, a worked example (all from prompts/tools.txt), and the available-tools list
+ * substituted for the file's {{tools}} tag. Returns '' when no tool is available, so the
+ * prompt is unchanged then. The template is read lazily and cached — code paths that only
+ * parse tool calls (no prompt building) don't depend on the file existing.
+ *
+ * NOTE: the call syntax described in tools.txt is parsed by TOOL_CALL_RE below — if you
+ * change the <tool_call> protocol in one place, change it in the other.
  */
 export function renderToolsBlock(tools: ToolDef[] = availableTools()): string {
   if (tools.length === 0) return '';
 
+  if (toolsTemplate === undefined) {
+    toolsTemplate = readFileSync(resolve(process.cwd(), config.llm.toolsPromptPath), 'utf8').trim();
+  }
+
   const list = tools.map((t) => `- ${t.name}(${t.args.join(', ')}): ${t.description}`).join('\n');
-
-  return `# Tools
-Your knowledge has a cutoff, so treat your memory of anything current (who holds a role/title now, news, prices, weather, dates, a real person's latest status) as unreliable — look it up instead of guessing. Don't search for small talk, opinions, or creative/roleplay.
-
-To call a tool, output ONE line, nothing else:
-<tool_call>{"name": "TOOL_NAME", "arguments": { ... }}</tool_call>
-The result returns as a [web search "…": …] block — use it in your own voice; don't mention searching or quote it verbatim.
-
-Example — User: who's the president of france right now?
-<tool_call>{"name": "web_search", "arguments": {"query": "current president of France"}}</tool_call>
-
-Tools:
-${list}`;
+  return toolsTemplate.replace(/\{\{\s*tools\s*\}\}/g, list);
 }
 
 /** A parsed tool call from the model's output. */

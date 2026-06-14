@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, copyFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
@@ -6,9 +6,27 @@ import { renderToolsBlock } from './tools.js';
 
 const log = createLogger('prompt');
 
-/** Raw template loaded once at startup; tags are substituted per message. */
-const template = readFileSync(resolve(process.cwd(), config.llm.systemPromptPath), 'utf8').trim();
-log.info(`Loaded system prompt template from ${config.llm.systemPromptPath} (${template.length} chars)`);
+/**
+ * Loads the user-owned persona layer, creating it from the shipped default on first run.
+ * The persona is the only user-editable layer (so it never receives later app changes —
+ * by design); the technical and tools layers stay app-owned and evolve with features.
+ */
+function loadPersona(): string {
+  const userPath = resolve(process.cwd(), config.llm.personaPromptPath);
+  if (!existsSync(userPath)) {
+    copyFileSync(resolve(process.cwd(), config.llm.personaDefaultPath), userPath);
+    log.info(`No persona file at ${config.llm.personaPromptPath}; created it from the default`);
+  }
+  return readFileSync(userPath, 'utf8').trim();
+}
+
+/**
+ * Raw template loaded once at startup; tags are substituted per message. Persona (user) +
+ * technical (app) are joined here; the tools block is appended per-render (it's conditional).
+ */
+const technical = readFileSync(resolve(process.cwd(), config.llm.technicalPromptPath), 'utf8').trim();
+const template = `${loadPersona()}\n\n${technical}`;
+log.info(`Loaded system prompt template (${template.length} chars)`);
 
 export interface PromptContext {
   /** Display name of the Telegram user the bot is talking to (for {{user}}). */

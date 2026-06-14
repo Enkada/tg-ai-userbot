@@ -62,8 +62,19 @@ alternating user/assistant turns, so two `user` (or two `assistant`) objects in 
 make the template throw or produce a malformed prompt — which happens naturally after
 `/delete`-ing a reply, or when several messages arrive back-to-back.
 
-The system prompt lives in a separate file: `prompts/system.txt`, and supports
-`{{tag}}` placeholders that are substituted per message:
+The system prompt is assembled from three layers, in order:
+
+| Layer | File | Owner | Notes |
+| ----- | ---- | ----- | ----- |
+| Persona | `prompts/persona.txt` | **user** (git-ignored) | Who the character is + chat style. Created from `persona.default.txt` on first run, then yours to edit. Never overwritten by app updates. |
+| Technical | `prompts/technical.txt` | app | Current literal app limits (no audio/video/files yet) + dynamic context. Evolves as features land. |
+| Tools | `prompts/tools.txt` | app | The tool-call protocol scaffold; its `{{tools}}` tag is filled with the available tools, and the whole layer is omitted when no tool is configured. |
+
+`persona.default.txt` is the shipped, neutral starting persona (and the source for a future
+"reset to default"). To reset, delete your `prompts/persona.txt` and restart — it's
+recreated from the default.
+
+All layers support `{{tag}}` placeholders that are substituted per message:
 
 | Tag          | Substituted with                                   |
 | ------------ | -------------------------------------------------- |
@@ -145,7 +156,8 @@ src/
     types.ts    Shared message helpers + provider interface + OpenAI-compatible call
     llamacpp.ts Local llama.cpp backend (chat, vision, exact token count, max ctx)
     openrouter.ts OpenRouter backend (chat, vision, /key usage, estimated tokens)
-  prompt.ts     System prompt loading + {{tag}} templating
+  prompt.ts     System prompt assembly (persona + technical) + {{tag}} templating
+  tools.ts      Tool registry + pseudo tool-call protocol (renders prompts/tools.txt)
   format.ts     Model-output → Telegram Markdown rendering
   typing.ts     "typing…" status helper
   memory.ts     Conversation memory + cache-friendly context windowing
@@ -154,7 +166,11 @@ src/
     index.ts    SQLite connection + migrations
   logger.ts     Timestamped logger
 prompts/
-  system.txt    System prompt (rough, editable)
+  persona.default.txt  Shipped default persona (tracked)
+  persona.txt          User-owned persona (git-ignored; copied from default on first run)
+  technical.txt        App-owned technical layer (limits + dynamic context)
+  tools.txt            App-owned tool-protocol scaffold (has {{tools}})
+  proactive-gate.txt   Yes/no evaluator prompt for proactive messaging
 drizzle/        Generated SQL migrations (committed)
 data/           SQLite session + memory DB (git-ignored)
 ```

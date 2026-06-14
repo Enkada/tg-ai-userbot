@@ -86,8 +86,15 @@ export const config = {
     name: process.env.CHAR_NAME ?? 'Sara',
   },
   llm: {
-    /** Path to the system prompt file, relative to the project root. */
-    systemPromptPath: process.env.SYSTEM_PROMPT_PATH ?? 'prompts/system.txt',
+    // ---- System prompt, assembled from three layers (persona + technical + tools) ----
+    /** User-owned persona layer — the only user-editable prompt. Created from the default on first run. */
+    personaPromptPath: process.env.PERSONA_PROMPT_PATH ?? 'prompts/persona.txt',
+    /** Shipped default persona: copied to personaPromptPath on first run, and the source for "reset to default". */
+    personaDefaultPath: 'prompts/persona.default.txt',
+    /** App-owned technical layer (current app limits + dynamic context). Evolves with features; never user-copied. */
+    technicalPromptPath: 'prompts/technical.txt',
+    /** App-owned tool-protocol scaffold; its {{tools}} tag is filled with the available-tools list. */
+    toolsPromptPath: 'prompts/tools.txt',
     // ---- Shared generation params (apply to whichever provider is active) ----
     temperature: numberEnv('LLM_TEMPERATURE', 0.7),
     maxTokens: numberEnv('LLM_MAX_TOKENS', 512),
