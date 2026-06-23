@@ -170,7 +170,6 @@ prompts/
   persona.txt          User-owned persona (git-ignored; copied from default on first run)
   technical.txt        App-owned technical layer (limits + dynamic context)
   tools.txt            App-owned tool-protocol scaffold (has {{tools}})
-  proactive-gate.txt   Yes/no evaluator prompt for proactive messaging
 drizzle/        Generated SQL migrations (committed)
 data/           SQLite session + memory DB (git-ignored)
 ```

@@ -43,6 +43,13 @@
       "when": 1781441367019,
       "tag": "0005_early_morgan_stark",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1782241788701,
+      "tag": "0006_nappy_sentry",
+      "breakpoints": true
     }
   ]
 }

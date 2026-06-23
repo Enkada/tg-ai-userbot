@@ -173,17 +173,34 @@ export const config = {
     /** The good-morning opener fires once at a random time within this hour range. */
     morningStartHour: numberEnv('PROACTIVE_MORNING_START', 7),
     morningEndHour: numberEnv('PROACTIVE_MORNING_END', 8),
-    /** Daytime silence: re-check this many minutes (random in range) after the last activity. */
-    silenceMinMinutes: numberEnv('PROACTIVE_SILENCE_MIN', 45),
+    /**
+     * Base daytime gap: the first reach-out comes a random number of minutes in this range
+     * after the user goes quiet. Each *unanswered* reach-out then adds `escalationStepMinutes`
+     * to the next gap (so they thin out the longer she's ignored).
+     */
+    silenceMinMinutes: numberEnv('PROACTIVE_SILENCE_MIN', 60),
     silenceMaxMinutes: numberEnv('PROACTIVE_SILENCE_MAX', 90),
-    /** How often the scheduler evaluates each chat (ms). */
-    tickMs: numberEnv('PROACTIVE_TICK_MS', 600_000),
-    /** Max tokens for the yes/no gate completion (it answers a single word). */
-    gateMaxTokens: numberEnv('PROACTIVE_GATE_MAX_TOKENS', 8),
-    /** How many recent messages the gate sees when judging. */
-    gateTranscriptDepth: numberEnv('PROACTIVE_GATE_DEPTH', 20),
-    /** Path to the neutral evaluator prompt, relative to the project root. */
-    gatePromptPath: process.env.PROACTIVE_GATE_PROMPT_PATH ?? 'prompts/proactive-gate.txt',
+    /** Minutes added to the gap per already-ignored reach-out (the escalation step). */
+    escalationStepMinutes: numberEnv('PROACTIVE_ESCALATION_STEP', 60),
+    /**
+     * Cap on consecutive ignored reach-outs. Once hit, the bot goes fully silent — no more
+     * openers, not even the next morning's greeting — until the user replies (which resets it).
+     */
+    maxIgnored: numberEnv('PROACTIVE_MAX_IGNORED', 8),
+    // ---- Follow-ups: continuing the conversation when the user goes briefly quiet ----
+    /** Probability (0–1) that a due follow-up actually fires. Rolled once; on a miss, nothing. */
+    followupChance: numberEnv('PROACTIVE_FOLLOWUP_CHANCE', 0.85),
+    /** Follow-up timer: fires this many minutes (random in range) after the user's last message. */
+    followupMinMinutes: numberEnv('PROACTIVE_FOLLOWUP_MIN', 2),
+    followupMaxMinutes: numberEnv('PROACTIVE_FOLLOWUP_MAX', 3),
+    /** Active-hours window for follow-ups (local hours): only continue a chat while start ≤ hour < end. */
+    followupWindowStartHour: numberEnv('PROACTIVE_FOLLOWUP_WINDOW_START', 9),
+    followupWindowEndHour: numberEnv('PROACTIVE_FOLLOWUP_WINDOW_END', 21),
+    /**
+     * How often the scheduler evaluates each chat (ms). Default 1 min so the short follow-up
+     * timer has fine enough granularity; the tick is cheap (a DB read, no LLM call).
+     */
+    tickMs: numberEnv('PROACTIVE_TICK_MS', 60_000),
   },
 } as const;
 

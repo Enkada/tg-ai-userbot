@@ -174,6 +174,10 @@ export interface ProactivePatch {
   /** Epoch ms the next check is due, or null to "unarm" (re-arm at next morning). */
   dueAt?: number | null;
   isMorning?: boolean;
+  /** Consecutive ignored reach-outs since the user last replied (escalation counter). */
+  ignoredCount?: number;
+  /** Epoch ms a follow-up is due, or null to clear it (consumed / no follow-up pending). */
+  followupDueAt?: number | null;
   userName?: string | null;
 }
 

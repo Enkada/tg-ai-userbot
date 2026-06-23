@@ -125,6 +125,19 @@ export const proactiveState = sqliteTable('proactive_state', {
   dueAt: integer('due_at'),
   /** Whether the next due check should use the "good morning" framing rather than daytime. */
   isMorning: integer('is_morning', { mode: 'boolean' }).notNull().default(false),
+  /**
+   * How many proactive messages the bot has sent since the user last replied, with no
+   * answer. Drives the escalating cooldown (each unanswered one lengthens the next gap),
+   * the hard-block cap, and the tone of the opener cue. Reset to 0 on any user activity.
+   */
+  ignoredCount: integer('ignored_count').notNull().default(0),
+  /**
+   * Epoch ms when a follow-up becomes due — a short timer started on user activity that, if
+   * the user stays quiet, makes the bot continue the conversation once. NULL means none is
+   * pending (consumed after one shot; re-armed by the next user message). Independent of the
+   * proactive schedule above: it never touches `ignoredCount`.
+   */
+  followupDueAt: integer('followup_due_at'),
   /** Cached display name of the peer, for the {{user}} tag when generating an opener. */
   userName: text('user_name'),
   /** Epoch ms of the last update. */

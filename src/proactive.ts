@@ -1,29 +1,34 @@
 /**
- * Proactive messaging — the bot initiating a conversation on its own, instead of only
+ * Proactive messaging — the bot initiating conversation on its own, instead of only
  * replying. A periodic tick evaluates each chat's schedule (kept in the DB so it survives
- * restarts) and, when a check comes due, asks the model a conservative yes/no "should I
- * reach out now?" gate. On yes it generates an opener through the normal persona path and
- * sends it. Guardrails keep it from being clingy: an active window (waking hours), one
- * outstanding proactive message at a time, and a silence/morning cadence.
+ * restarts). There are two independent systems, both driven off the same tick:
  *
- * See the design notes in the project memory; the two LLM calls have deliberately different
- * shapes — the gate is a neutral control-flow classification (flattened transcript, tiny
- * token budget), the opener is the full in-character generation.
+ *  - **Reach-outs**: an always-on good-morning greeting (random time in the morning window),
+ *    then daytime openers on an *escalating cooldown* — the first comes a base gap after the
+ *    user goes quiet, and every reach-out that goes unanswered lengthens the next gap and
+ *    bumps an `ignoredCount`. After `maxIgnored` unanswered ones she goes fully silent until
+ *    the user replies (which resets the count). No yes/no model call gates this — ignoring is
+ *    itself the "stop" signal, via the escalation.
+ *
+ *  - **Follow-ups**: when the user replies and then goes quiet for a couple of minutes mid-
+ *    conversation, the bot continues once on its own (probabilistic, capped at one). This is
+ *    a short-timescale "don't let the thread die" nudge, separate from the reach-out chain —
+ *    it never touches `ignoredCount`, and only runs during active daytime hours.
+ *
+ * Both openers are generated through the normal persona path (full in-character generation
+ * with an ephemeral director cue), never a flattened control-flow prompt.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { InputPeerLike, TelegramClient } from '@mtcute/node';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { enqueue } from './queue.js';
-import { renderSystemPrompt, dayPeriod } from './prompt.js';
-import { activeProviderId, complete, type ChatMessage } from './llm.js';
+import { renderSystemPrompt } from './prompt.js';
+import { activeProviderId } from './llm.js';
 import { ephemeralSearchStrategy, generateReply } from './generate.js';
 import {
   getLastMessageMeta,
   getLastUserMessageAt,
   getProactiveState,
-  getWindow,
   saveMessage,
   upsertProactiveState,
 } from './memory.js';
@@ -37,10 +42,15 @@ type Framing = 'morning' | 'daytime';
 
 // ---- Scheduling helpers ------------------------------------------------------------------
 
-/** A random epoch-ms due time `silenceMin`..`silenceMax` minutes from now. */
-function nextSilenceDue(): number {
-  const { silenceMinMinutes, silenceMaxMinutes } = config.proactive;
-  const minutes = silenceMinMinutes + Math.random() * (silenceMaxMinutes - silenceMinMinutes);
+/**
+ * A random epoch-ms due time for the next reach-out. `ignored` is how many reach-outs have
+ * already gone unanswered: the gap is the base silence range plus one escalation step per
+ * ignored one, so it stretches out the longer she's been left on read.
+ */
+function nextSilenceDue(ignored: number): number {
+  const { silenceMinMinutes, silenceMaxMinutes, escalationStepMinutes } = config.proactive;
+  const base = silenceMinMinutes + Math.random() * (silenceMaxMinutes - silenceMinMinutes);
+  const minutes = base + Math.max(0, ignored) * escalationStepMinutes;
   return Date.now() + minutes * 60_000;
 }
 
@@ -55,6 +65,13 @@ function morningDueAt(now: Date): number {
   return Math.max(at, now.getTime());
 }
 
+/** A random epoch-ms due time for the follow-up timer (a couple of minutes out). */
+function nextFollowupDue(): number {
+  const { followupMinMinutes, followupMaxMinutes } = config.proactive;
+  const minutes = followupMinMinutes + Math.random() * (followupMaxMinutes - followupMinMinutes);
+  return Date.now() + minutes * 60_000;
+}
+
 /** Hours since the user's last message (large sentinel when there's no user message yet). */
 function hoursSinceLastUser(chatId: number): number {
   const at = getLastUserMessageAt(chatId);
@@ -62,148 +79,182 @@ function hoursSinceLastUser(chatId: number): number {
   return Math.max(0, (Date.now() - at) / 3_600_000);
 }
 
-// ---- The yes/no gate ---------------------------------------------------------------------
+/** True when `hour` is inside the follow-up's active-daytime window. */
+function inFollowupWindow(hour: number): boolean {
+  const { followupWindowStartHour, followupWindowEndHour } = config.proactive;
+  return hour >= followupWindowStartHour && hour < followupWindowEndHour;
+}
 
-/** The neutral evaluator prompt, loaded once (lazily) and cached. */
-let gateTemplate: string | null = null;
+// ---- Generating & sending an opener ------------------------------------------------------
 
-function getGateTemplate(): string {
-  if (gateTemplate !== null) return gateTemplate;
-  try {
-    gateTemplate = readFileSync(resolve(process.cwd(), config.proactive.gatePromptPath), 'utf8').trim();
-  } catch (err) {
-    log.error(`Could not read gate prompt at ${config.proactive.gatePromptPath}; using a built-in default.`, err);
-    gateTemplate =
-      'Decide whether {{char}} should message {{user}} right now, unprompted. It is {{period}}, ' +
-      'about {{hours}}h since {{user}} last messaged.{{framing_note}} Be conservative. ' +
-      'Answer with exactly one word, lowercase: yes or no.';
+/**
+ * Builds the ephemeral director cue for a reach-out (appended as a user turn to the generation
+ * window, never stored). `attempt` is which reach-out this is since the user last replied (1 =
+ * first); from the 2nd on it tells her she's been left unanswered so her tone can escalate.
+ */
+function buildReachoutCue(framing: Framing, hours: number, attempt: number, userName: string): string {
+  if (framing === 'morning') {
+    return (
+      `[System note: it's morning and ${userName} hasn't messaged yet — you're reaching out first. ` +
+      `Greet them warmly and gently start the day. Keep it short and natural, like a real text.]`
+    );
   }
-  return gateTemplate;
+  const head =
+    `[System note: ${userName} hasn't messaged in about ${Math.round(hours)}h and did NOT just ` +
+    `message you — you're choosing to reach out first.`;
+  if (attempt <= 1) {
+    return `${head} Start a light, natural conversation — say whatever's on your mind. Keep it short.]`;
+  }
+  return (
+    `${head} This is the ${attempt}${ordinalSuffix(attempt)} time you've reached out since they last ` +
+    `replied and you've gotten no answer — let that color your tone (wry, a little hurt, or playfully ` +
+    `persistent, however you feel it), but stay in character and keep it short.]`
+  );
 }
 
-/** Renders the gate system prompt for the current context. */
-function renderGatePrompt(period: string, hours: number, framing: Framing, userName: string): string {
-  const framingNote =
-    framing === 'morning' ? ' This would be a good-morning greeting to start the day.' : '';
-  const vars: Record<string, string> = {
-    char: config.character.name,
-    user: userName,
-    period,
-    hours: String(Math.round(hours)),
-    framing_note: framingNote,
-  };
-  return getGateTemplate().replace(/\{\{\s*(\w+)\s*\}\}/g, (m, name: string) => {
-    const key = name.toLowerCase();
-    return key in vars ? vars[key] : m;
-  });
+/** Builds the ephemeral director cue for a follow-up (continuing a stalled live conversation). */
+function buildFollowupCue(userName: string): string {
+  return (
+    `[System note: ${userName} went quiet for a few minutes mid-conversation and hasn't replied. ` +
+    `Send a natural follow-up — pick the thread back up, ask something, or if the topic feels done, ` +
+    `lightly switch to something new. Keep it short, like a real text.]`
+  );
 }
 
-/** Flattens the recent window into plain `Name: text` lines so the gate reads it as a task, not a turn to continue. */
-function flattenTranscript(window: ChatMessage[], depth: number): string {
-  if (window.length === 0) return '(no prior messages)';
-  const char = config.character.name;
-  return window
-    .slice(-depth)
-    .map((m) => `${m.role === 'user' ? 'User' : char}: ${m.content}`)
-    .join('\n');
-}
-
-interface GateResult {
-  yes: boolean;
-  /** Raw model output, kept for logging/tuning. */
-  raw: string;
+/** English ordinal suffix for small counts (1→st, 2→nd, 3→rd, else th). */
+function ordinalSuffix(n: number): string {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return 'th';
+  switch (n % 10) {
+    case 1:
+      return 'st';
+    case 2:
+      return 'nd';
+    case 3:
+      return 'rd';
+    default:
+      return 'th';
+  }
 }
 
 /**
- * Asks the active provider whether to reach out now. Neutral system prompt + the flattened
- * transcript as a user turn, constrained to a one-word answer and parsed on the first word
- * (so "no, i wouldn't" reads as no). Any failure or ambiguity defaults to no.
+ * Generates an opener in-character (against the given cue) and sends it, persisting it as a
+ * proactive assistant message. The cue is injected only into the in-memory generation array —
+ * never stored — so it can't pollute the user-activity timer or future context; the opener may
+ * still run the `web_search` tool, with the search held in memory only (see
+ * {@link ephemeralSearchStrategy}). Throws on failure (the caller decides how to recover).
  */
-async function runGate(chatId: number, framing: Framing, userName: string): Promise<GateResult> {
-  const window = getWindow(chatId);
-  const transcript = flattenTranscript(window, config.proactive.gateTranscriptDepth);
-  const system = renderGatePrompt(dayPeriod(new Date().getHours()), hoursSinceLastUser(chatId), framing, userName);
-  const messages: ChatMessage[] = [
-    { role: 'system', content: system },
-    { role: 'user', content: `Recent conversation:\n${transcript}\n\nDecision:` },
-  ];
-
-  let raw = '';
-  try {
-    const res = await complete(messages, { maxTokens: config.proactive.gateMaxTokens, temperature: 0 });
-    raw = res.content.trim();
-  } catch (err) {
-    log.error(`Gate call failed for chat ${chatId}:`, err);
-    return { yes: false, raw: 'error' };
-  }
-  // First alphabetic word, lowercased — robust to punctuation and trailing prose.
-  const firstWord = raw.toLowerCase().replace(/[^a-z]+/g, ' ').trim().split(' ')[0] ?? '';
-  return { yes: firstWord === 'yes', raw };
-}
-
-// ---- Generating & sending the opener -----------------------------------------------------
-
-/** Builds the ephemeral director cue appended (as a user turn) to the generation window. */
-function buildCue(framing: Framing, hours: number, userName: string): string {
-  const head = `[System note: ${userName} hasn't messaged in about ${Math.round(hours)}h and did NOT just message you — you're choosing to reach out first.`;
-  return framing === 'morning'
-    ? `${head} It's morning — greet them warmly and gently start a conversation. Keep it short and natural.]`
-    : `${head} Start a light, natural conversation — say whatever's on your mind. Keep it short.]`;
-}
-
-/**
- * Generates an opener in-character and sends it, persisting it as a proactive assistant
- * message. The cue is injected only into the in-memory generation array — never stored —
- * so it can't pollute the user-activity timer or future context; the opener may still run
- * the `web_search` tool (e.g. a deferred "look this up when I wake" request), with the
- * search held in memory only (see {@link ephemeralSearchStrategy}). Throws on failure (the
- * caller reschedules), and only the successful send marks the row proactive (so a failed
- * send never trips the "one outstanding" guard).
- */
-async function sendProactive(
+async function sendOpener(
   client: TelegramClient,
   chatId: number,
-  framing: Framing,
+  cue: string,
   userName: string,
+  label: string,
 ): Promise<void> {
-  const hours = hoursSinceLastUser(chatId);
   const systemPrompt = renderSystemPrompt({ userName });
-  const cue = buildCue(framing, hours, userName);
-
   const peer: InputPeerLike = chatId;
   const reply = await withTyping(client, peer, () =>
-    generateReply(systemPrompt, ephemeralSearchStrategy(chatId, cue), `proactive chat ${chatId}`),
+    generateReply(systemPrompt, ephemeralSearchStrategy(chatId, cue), label),
   );
   const text = finalizeReply(reply.content);
   const sent = await client.sendText(peer, renderMarkdown(text));
   saveMessage(chatId, 'assistant', text, sent.id, { provider: activeProviderId(), model: reply.model }, true);
-  log.info(`Proactive [${framing}] sent to chat ${chatId}: ${text.slice(0, 80)}`);
+  log.info(`${label} sent: ${text.slice(0, 80)}`);
 }
 
-// ---- The per-chat state machine ----------------------------------------------------------
+/** Sends a reach-out (morning greeting or daytime opener) as attempt #`attempt`. */
+async function sendReachout(
+  client: TelegramClient,
+  chatId: number,
+  framing: Framing,
+  attempt: number,
+  userName: string,
+): Promise<void> {
+  const cue = buildReachoutCue(framing, hoursSinceLastUser(chatId), attempt, userName);
+  await sendOpener(client, chatId, cue, userName, `Proactive [${framing} #${attempt}] chat ${chatId}`);
+}
+
+// ---- Follow-ups --------------------------------------------------------------------------
 
 /**
- * Evaluates one chat's schedule and, when due, runs the gate and maybe sends an opener.
- * Must run inside the chat's queue (see {@link enqueue}) so it never races a user reply.
+ * Runs the follow-up timer for one chat: when it's due, consume it (one shot), and — inside
+ * the active-daytime window, only if the last stored message is still ours (the user hasn't
+ * replied since) — roll the probability and, on a hit, continue the conversation once. Never
+ * touches the reach-out escalation. Swallows send errors (the timer is already consumed).
  */
-async function evaluateChat(client: TelegramClient, chatId: number): Promise<void> {
-  const now = new Date();
+async function maybeFollowup(client: TelegramClient, chatId: number, now: Date): Promise<void> {
+  const state = getProactiveState(chatId);
+  if (!state || state.followupDueAt == null) return;
+  if (now.getTime() < state.followupDueAt) return;
+
+  // Due → consume immediately (capped at one per user reply, regardless of outcome).
+  upsertProactiveState(chatId, { followupDueAt: null });
+
+  const p = config.proactive;
+  if (!inFollowupWindow(now.getHours())) {
+    log.info(`Followup [chat ${chatId}]: skipped — outside ${p.followupWindowStartHour}:00–${p.followupWindowEndHour}:00.`);
+    return;
+  }
+
+  // Only continue a live thread: the latest stored message must be ours. If the user had
+  // replied, onUserActivity would have re-armed this timer rather than leaving it to fire.
+  const lastMeta = getLastMessageMeta(chatId);
+  if (lastMeta?.role !== 'assistant') return;
+
+  const roll = Math.random();
+  if (roll >= p.followupChance) {
+    log.info(`Followup [chat ${chatId}]: roll ${roll.toFixed(2)} ≥ ${p.followupChance} — staying quiet.`);
+    return;
+  }
+  log.info(`Followup [chat ${chatId}]: roll ${roll.toFixed(2)} < ${p.followupChance} — continuing.`);
+
+  const userName = state.userName ?? 'there';
+  try {
+    await sendOpener(client, chatId, buildFollowupCue(userName), userName, `Followup chat ${chatId}`);
+  } catch (err) {
+    log.error(`Followup send failed for chat ${chatId}:`, err);
+  }
+}
+
+// ---- The per-chat reach-out state machine ------------------------------------------------
+
+/** Reschedules the next reach-out after one was just sent, or hard-blocks at the cap. */
+function rescheduleAfterReachout(chatId: number, ignoredCount: number): void {
+  const atCap = ignoredCount >= config.proactive.maxIgnored;
+  upsertProactiveState(chatId, {
+    ignoredCount,
+    isMorning: false,
+    // At the cap: unarm (dueAt null) and stay silent until the user replies. Otherwise arm
+    // the next reach-out with the escalated gap.
+    dueAt: atCap ? null : nextSilenceDue(ignoredCount),
+  });
+}
+
+/**
+ * Evaluates one chat's reach-out schedule and, when due, sends an opener. Must run inside the
+ * chat's queue (see {@link enqueue}) so it never races a user reply.
+ */
+async function evaluateReachout(client: TelegramClient, chatId: number, now: Date): Promise<void> {
   const hour = now.getHours();
   const p = config.proactive;
 
-  // Outside the active window (night): unarm so the morning opener re-arms tomorrow.
+  // Outside the active window (night): unarm so the morning opener re-arms tomorrow. The
+  // ignored-count is deliberately preserved across the night (an ignored chain continues).
   if (hour < p.windowStartHour || hour >= p.windowEndHour) {
     const state = getProactiveState(chatId);
     if (state?.dueAt != null) upsertProactiveState(chatId, { dueAt: null, isMorning: false });
     return;
   }
 
-  // Guard: never stack proactive messages. If the last message is an unanswered proactive
-  // reply, stay silent until the user replies (this persists across days, by design).
-  const lastMeta = getLastMessageMeta(chatId);
-  if (lastMeta?.role === 'assistant' && lastMeta.proactive) return;
-
   const state = getProactiveState(chatId);
+  const ignored = state?.ignoredCount ?? 0;
+
+  // Cap reached: hard block — no reach-outs at all (not even the morning greeting) until the
+  // user replies, which resets the count via onUserActivity.
+  if (ignored >= p.maxIgnored) {
+    if (state?.dueAt != null) upsertProactiveState(chatId, { dueAt: null, isMorning: false });
+    return;
+  }
 
   // Unarmed (fresh, or just reset by night): arm the next check.
   if (!state || state.dueAt == null) {
@@ -211,9 +262,9 @@ async function evaluateChat(client: TelegramClient, chatId: number): Promise<voi
       // Still within/before the morning window — arm the good-morning opener.
       upsertProactiveState(chatId, { dueAt: morningDueAt(now), isMorning: true });
     } else {
-      // Past the morning window (e.g. an afternoon restart) — no greeting today; begin
-      // the daytime silence cadence instead.
-      upsertProactiveState(chatId, { dueAt: nextSilenceDue(), isMorning: false });
+      // Past the morning window (e.g. an afternoon restart) — begin the daytime cadence,
+      // honouring any escalation already in progress.
+      upsertProactiveState(chatId, { dueAt: nextSilenceDue(ignored), isMorning: false });
     }
     return;
   }
@@ -221,37 +272,45 @@ async function evaluateChat(client: TelegramClient, chatId: number): Promise<voi
   // Armed but not yet due.
   if (Date.now() < state.dueAt) return;
 
-  // Due: decide, then maybe send. `isMorning` is consumed either way.
+  // Due: send (no gate). This is the (ignored+1)-th reach-out since the user last replied.
   const framing: Framing = state.isMorning ? 'morning' : 'daytime';
   const userName = state.userName ?? 'there';
-  const decision = await runGate(chatId, framing, userName);
-  log.info(`Gate [chat ${chatId}, ${framing}, ~${Math.round(hoursSinceLastUser(chatId))}h]: ${decision.yes ? 'YES' : 'NO'} (raw: ${JSON.stringify(decision.raw)})`);
-
-  if (!decision.yes) {
-    upsertProactiveState(chatId, { isMorning: false, dueAt: nextSilenceDue() });
-    return;
-  }
-
-  upsertProactiveState(chatId, { isMorning: false });
+  const attempt = ignored + 1;
   try {
-    await sendProactive(client, chatId, framing, userName);
-    // Success: the new proactive row now trips the guard until the user replies — no reschedule.
+    await sendReachout(client, chatId, framing, attempt, userName);
+    rescheduleAfterReachout(chatId, attempt);
   } catch (err) {
+    // Failed send doesn't count as an ignored message — retry at the same escalation level.
     log.error(`Proactive send failed for chat ${chatId}; rescheduling.`, err);
-    upsertProactiveState(chatId, { dueAt: nextSilenceDue() });
+    upsertProactiveState(chatId, { dueAt: nextSilenceDue(ignored) });
   }
+}
+
+/** Evaluates both systems for one chat in a single tick. */
+async function evaluateChat(client: TelegramClient, chatId: number): Promise<void> {
+  const now = new Date();
+  // Follow-ups run on their own short timer + window, independent of the reach-out window.
+  await maybeFollowup(client, chatId, now);
+  await evaluateReachout(client, chatId, now);
 }
 
 // ---- Public surface ----------------------------------------------------------------------
 
 /**
- * Records that the user was just active in a chat: resets the silence timer and cancels any
- * pending good-morning (the user beat the bot to it), and caches their display name for the
- * {{user}} tag when the bot later initiates. No-op when proactivity is disabled.
+ * Records that the user was just active in a chat. Resets the reach-out escalation (count → 0)
+ * and arms the base daytime gap, cancels any pending good-morning (the user beat the bot to
+ * it), starts the follow-up timer, and caches their display name for the {{user}} tag. No-op
+ * when proactivity is disabled.
  */
 export function onUserActivity(chatId: number, userName: string): void {
   if (!config.proactive.enabled) return;
-  upsertProactiveState(chatId, { dueAt: nextSilenceDue(), isMorning: false, userName });
+  upsertProactiveState(chatId, {
+    dueAt: nextSilenceDue(0),
+    isMorning: false,
+    ignoredCount: 0,
+    followupDueAt: nextFollowupDue(),
+    userName,
+  });
 }
 
 /** Starts the periodic scheduler. One tick evaluates every whitelisted chat, enqueued. */
@@ -259,7 +318,9 @@ export function startProactiveLoop(client: TelegramClient): void {
   const p = config.proactive;
   log.info(
     `Proactive messaging ON — window ${p.windowStartHour}:00–${p.windowEndHour}:00, ` +
-      `tick ${Math.round(p.tickMs / 1000)}s, silence ${p.silenceMinMinutes}-${p.silenceMaxMinutes}m.`,
+      `tick ${Math.round(p.tickMs / 1000)}s, base gap ${p.silenceMinMinutes}-${p.silenceMaxMinutes}m ` +
+      `(+${p.escalationStepMinutes}m/ignore, cap ${p.maxIgnored}), ` +
+      `follow-ups ${Math.round(p.followupChance * 100)}% in ${p.followupMinMinutes}-${p.followupMaxMinutes}m.`,
   );
   const tick = (): void => {
     for (const chatId of config.whitelist) {
@@ -279,44 +340,50 @@ export function getProactiveStatus(chatId: number): string {
   if (!p.enabled) return 'Proactive messaging is **off** (set `PROACTIVE_ENABLED=true`).';
 
   const state = getProactiveState(chatId);
-  const lastMeta = getLastMessageMeta(chatId);
-  const blocked = lastMeta?.role === 'assistant' && lastMeta.proactive;
+  const ignored = state?.ignoredCount ?? 0;
+  const fmt = (ms: number): string =>
+    new Date(ms).toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
+
   const due =
-    state?.dueAt == null
-      ? 'unarmed (re-arms at morning)'
-      : new Date(state.dueAt).toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
+    ignored >= p.maxIgnored
+      ? `blocked — ${ignored}/${p.maxIgnored} ignored (waiting for your reply)`
+      : state?.dueAt == null
+        ? 'unarmed (re-arms at morning)'
+        : `${fmt(state.dueAt)}${state.isMorning ? ' (morning)' : ''}`;
+  const followup = state?.followupDueAt == null ? 'none pending' : fmt(state.followupDueAt);
 
   return [
     `Window: **${p.windowStartHour}:00–${p.windowEndHour}:00** · tick **${Math.round(p.tickMs / 1000)}s**`,
-    `Next check: **${due}**${state?.isMorning ? ' (morning)' : ''}`,
+    `Next reach-out: **${due}**`,
+    `Ignored streak: **${ignored}/${p.maxIgnored}**`,
+    `Follow-up: **${followup}** (${Math.round(p.followupChance * 100)}% chance)`,
     `Silence since last user msg: **${Math.round(hoursSinceLastUser(chatId))}h**`,
-    blocked ? 'Status: **paused** — an unanswered proactive message is outstanding.' : 'Status: **armed**',
   ].join('\n');
 }
 
 /**
- * Forces an immediate gate + send for testing (`/proactive test`), bypassing the timer but
- * still respecting the "one outstanding message" guard. Returns a short status string.
+ * Forces an immediate opener for testing (`/proactive test` and `/proactive followup`),
+ * bypassing the timers. It does *not* mutate the schedule or the ignored-count — it's a
+ * preview of how the cue reads — so it's safe to run repeatedly. Returns a short status string.
  */
 export async function runProactiveNow(
   client: TelegramClient,
   chatId: number,
   userName: string,
+  kind: 'reachout' | 'followup' = 'reachout',
 ): Promise<string> {
   if (!config.proactive.enabled) return 'Proactive messaging is off — enable it first.';
 
-  const lastMeta = getLastMessageMeta(chatId);
-  if (lastMeta?.role === 'assistant' && lastMeta.proactive) {
-    return 'Blocked — an unanswered proactive message is already outstanding.';
-  }
-
-  const decision = await runGate(chatId, 'daytime', userName);
-  if (!decision.yes) return `Gate said **no** (raw: ${JSON.stringify(decision.raw)}).`;
   try {
-    await sendProactive(client, chatId, 'daytime', userName);
-    return `Gate said **yes** — opener sent.`;
+    if (kind === 'followup') {
+      await sendOpener(client, chatId, buildFollowupCue(userName), userName, `Followup test chat ${chatId}`);
+      return 'Follow-up sent (preview — schedule unchanged).';
+    }
+    const attempt = (getProactiveState(chatId)?.ignoredCount ?? 0) + 1;
+    await sendReachout(client, chatId, 'daytime', attempt, userName);
+    return `Reach-out sent (preview of attempt #${attempt} — schedule unchanged).`;
   } catch (err) {
     log.error('Forced proactive send failed:', err);
-    return '⚠️ Gate said yes but the send failed (see logs).';
+    return '⚠️ Send failed (see logs).';
   }
 }

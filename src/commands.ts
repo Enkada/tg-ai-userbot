@@ -370,12 +370,13 @@ register({
 register({
   name: 'proactive',
   aliases: ['pro'],
-  description: 'Show the proactive schedule; /proactive test forces a gate + send now',
+  description: 'Show the proactive schedule; /proactive test | followup previews an opener now',
   handler: async ({ client, reply, chatId, userName, args }) => {
-    if (args[0]?.toLowerCase() === 'test') {
-      // The gate runs silently (no typing); sendProactive shows its own typing on YES.
-      const result = await runProactiveNow(client, chatId, userName);
-      await reply(md(`🛎️ **Proactive test**\n${result}`));
+    const sub = args[0]?.toLowerCase();
+    if (sub === 'test' || sub === 'followup') {
+      const kind = sub === 'followup' ? 'followup' : 'reachout';
+      const result = await runProactiveNow(client, chatId, userName, kind);
+      await reply(md(`🛎️ **Proactive ${sub}**\n${result}`));
       return;
     }
     await reply(md(`🛎️ **Proactive**\n${getProactiveStatus(chatId)}`));
