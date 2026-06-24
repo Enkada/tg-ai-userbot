@@ -7,10 +7,9 @@
 import { createLogger } from './logger.js';
 import { llamaCpp } from './providers/llamacpp.js';
 import { openRouter } from './providers/openrouter.js';
-import type { ChatMessage, ChatResult, LlmProvider, ProviderId, ProviderStatus } from './providers/types.js';
+import type { ChatMessage, ChatResult, LlmProvider, ProviderId, ProviderStatus, TokenSink } from './providers/types.js';
 
-export type { ChatMessage, ChatResult } from './providers/types.js';
-export { buildMessages } from './providers/types.js';
+export type { ChatMessage, ChatResult, TokenSink } from './providers/types.js';
 export { getOpenRouterInfo } from './providers/openrouter.js';
 
 const log = createLogger('llm');
@@ -44,14 +43,11 @@ export function activeProviderId(): ProviderId {
   return active.id;
 }
 
-export const chat = (systemPrompt: string, history: ChatMessage[]): Promise<ChatResult> =>
-  active.chat(systemPrompt, history);
-
-/** Raw completion over an explicit message array (the proactive gate's control-flow call). */
-export const complete = (
-  messages: ChatMessage[],
-  opts: { maxTokens: number; temperature: number },
-): Promise<ChatResult> => active.complete(messages, opts);
+export const chat = (
+  systemPrompt: string,
+  history: ChatMessage[],
+  onToken?: TokenSink,
+): Promise<ChatResult> => active.chat(systemPrompt, history, onToken);
 
 export const describeImage = (base64: string, mime?: string): Promise<string> =>
   active.describeImage(base64, mime);

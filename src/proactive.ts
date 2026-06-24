@@ -23,7 +23,7 @@ import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { enqueue } from './queue.js';
 import { renderSystemPrompt } from './prompt.js';
-import { activeProviderId } from './llm.js';
+import { activeProviderId, type ChatResult } from './llm.js';
 import { ephemeralSearchStrategy, generateReply } from './generate.js';
 import {
   getLastMessageMeta,
@@ -33,7 +33,7 @@ import {
   upsertProactiveState,
 } from './memory.js';
 import { finalizeReply } from './tools.js';
-import { renderMarkdown } from './format.js';
+import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
 
 const log = createLogger('proactive');
@@ -153,12 +153,24 @@ async function sendOpener(
 ): Promise<void> {
   const systemPrompt = renderSystemPrompt({ userName });
   const peer: InputPeerLike = chatId;
-  const reply = await withTyping(client, peer, () =>
-    generateReply(systemPrompt, ephemeralSearchStrategy(chatId, cue), label),
-  );
+  const streamer = new ReplyStreamer(client, peer);
+  let reply: ChatResult;
+  try {
+    reply = await withTyping(client, peer, () =>
+      generateReply(systemPrompt, ephemeralSearchStrategy(chatId, cue), label, streamer),
+    );
+  } catch (err) {
+    // If bubbles already streamed, persist them (proactive flag) so the "one outstanding
+    // proactive message" guard stays consistent with the chat, then rethrow for the caller.
+    const partialText = finalizeReply(streamer.streamedText);
+    if (streamer.ids.length > 0 && partialText) {
+      saveMessage(chatId, 'assistant', partialText, streamer.ids, { provider: activeProviderId(), model: null }, true);
+    }
+    throw err;
+  }
   const text = finalizeReply(reply.content);
-  const sent = await client.sendText(peer, renderMarkdown(text));
-  saveMessage(chatId, 'assistant', text, sent.id, { provider: activeProviderId(), model: reply.model }, true);
+  const sentIds = await streamer.finalize(text);
+  saveMessage(chatId, 'assistant', text, sentIds, { provider: activeProviderId(), model: reply.model }, true);
   log.info(`${label} sent: ${text.slice(0, 80)}`);
 }
 

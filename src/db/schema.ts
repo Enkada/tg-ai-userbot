@@ -14,10 +14,13 @@ export const messages = sqliteTable(
     role: text('role', { enum: ['user', 'assistant'] }).notNull(),
     content: text('content').notNull(),
     /**
-     * Telegram message id of the sent message, when known. Stored for assistant
-     * replies so `/reroll` and `/update` can edit the original message in place.
+     * Telegram message id(s) of the sent message(s), when known, as a JSON array. A reply
+     * is one memory row but may be delivered as several chat bubbles when streaming splits
+     * it (see {@link splitMessage}); all their ids live here so `/delete` can revoke every
+     * bubble and `/reroll` / `/update` can replace the whole set. A non-streamed reply (or a
+     * user message) stores a single-element array. NULL for rows written before id tracking.
      */
-    tgMessageId: integer('tg_message_id'),
+    tgMessageIds: text('tg_message_ids', { mode: 'json' }).$type<number[]>(),
     /**
      * Which backend generated this reply (assistant rows only; NULL for user rows and
      * for rows written before provenance tracking existed). See {@link LlmProvider}.

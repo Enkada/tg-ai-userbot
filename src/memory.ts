@@ -43,17 +43,18 @@ export interface GenerationSource {
 }
 
 /**
- * Appends a message to the conversation memory. `tgMessageId` is the Telegram id of
- * the sent message (stored for assistant replies so they can be edited later). `source`
- * records which provider/model generated an assistant reply (omit for user messages).
- * `proactive` marks an assistant reply the bot sent unprompted (the initiating message).
- * Returns the new row's id, so image captions can be linked to it via {@link saveAttachment}.
+ * Appends a message to the conversation memory. `tgMessageIds` are the Telegram id(s) of the
+ * sent message(s) — one for a user message or a single-bubble reply, several when streaming
+ * splits a reply into bubbles (stored so they can be revoked/replaced later). `source` records
+ * which provider/model generated an assistant reply (omit for user messages). `proactive` marks
+ * an assistant reply the bot sent unprompted (the initiating message). Returns the new row's id,
+ * so image captions can be linked to it via {@link saveAttachment}.
  */
 export function saveMessage(
   chatId: number,
   role: 'user' | 'assistant',
   content: string,
-  tgMessageId?: number,
+  tgMessageIds?: number[],
   source?: GenerationSource,
   proactive = false,
 ): number {
@@ -63,7 +64,7 @@ export function saveMessage(
       chatId,
       role,
       content,
-      tgMessageId,
+      tgMessageIds,
       provider: source?.provider,
       model: source?.model,
       proactive,
@@ -98,14 +99,17 @@ export interface LastAssistant {
   /** Row id, used to override the record in place. */
   id: number;
   content: string;
-  /** Telegram message id of the reply, or null for rows saved before it was tracked. */
-  tgMessageId: number | null;
+  /**
+   * Telegram message id(s) of the reply's bubble(s), or null for rows saved before id
+   * tracking. A single-bubble reply has one id; a streamed reply has one per bubble.
+   */
+  tgMessageIds: number[] | null;
 }
 
 /** Returns the latest non-deleted assistant message for a chat, or null. */
 export function getLastAssistant(chatId: number): LastAssistant | null {
   const row = db
-    .select({ id: messages.id, content: messages.content, tgMessageId: messages.tgMessageId })
+    .select({ id: messages.id, content: messages.content, tgMessageIds: messages.tgMessageIds })
     .from(messages)
     .where(
       and(eq(messages.chatId, chatId), eq(messages.role, 'assistant'), eq(messages.deleted, false)),
@@ -207,16 +211,20 @@ export function upsertProactiveState(chatId: number, patch: ProactivePatch): voi
  * - a {@link GenerationSource} → set provider/model (a `/reroll` regenerated the reply);
  * - `null` → clear provider/model (a manual `/update` — the text is now human-authored);
  * - omitted → leave provenance unchanged.
+ * `tgMessageIds`, when given, replaces the stored bubble id(s) — `/reroll` and `/update`
+ * revoke the old bubbles and send fresh ones, so the row must point at the new messages.
  */
 export function updateMessageContent(
   id: number,
   content: string,
   source?: GenerationSource | null,
+  tgMessageIds?: number[],
 ): void {
-  const patch =
+  const patch: Record<string, unknown> =
     source === undefined
       ? { content }
       : { content, provider: source?.provider ?? null, model: source?.model ?? null };
+  if (tgMessageIds !== undefined) patch.tgMessageIds = tgMessageIds;
   db.update(messages).set(patch).where(eq(messages.id, id)).run();
 }
 
@@ -330,18 +338,19 @@ export function getWindowInfo(chatId: number): WindowInfo {
 export interface DeleteResult {
   /** How many memory rows were flagged deleted. */
   flagged: number;
-  /** Telegram message ids of the flagged rows (for revoking them in the chat). */
+  /** Telegram message ids of every bubble of the flagged rows (for revoking them in the chat). */
   tgMessageIds: number[];
 }
 
 /**
  * Soft-deletes the last `n` (non-deleted) messages of a chat — same `deleted` flag as
  * /reset, nothing is physically removed. Returns the count flagged and the Telegram ids
- * to revoke in the chat (rows without a stored id, if any, are flagged but not revokable).
+ * to revoke in the chat — every bubble of each row, since a streamed reply spans several
+ * (rows without stored ids, if any, are flagged but not revokable).
  */
 export function deleteLastMessages(chatId: number, n: number): DeleteResult {
   const rows = db
-    .select({ id: messages.id, tgMessageId: messages.tgMessageId })
+    .select({ id: messages.id, tgMessageIds: messages.tgMessageIds })
     .from(messages)
     .where(and(eq(messages.chatId, chatId), eq(messages.deleted, false)))
     .orderBy(desc(messages.id))
@@ -354,9 +363,7 @@ export function deleteLastMessages(chatId: number, n: number): DeleteResult {
     .where(inArray(messages.id, rows.map((r) => r.id)))
     .run();
 
-  const tgMessageIds = rows
-    .map((r) => r.tgMessageId)
-    .filter((id): id is number => id !== null);
+  const tgMessageIds = rows.flatMap((r) => r.tgMessageIds ?? []);
   return { flagged: rows.length, tgMessageIds };
 }
 

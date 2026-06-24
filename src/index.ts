@@ -8,7 +8,7 @@ import { runMigrations } from './db/index.js';
 import { saveAttachment, saveMessage } from './memory.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
 import { finalizeReply } from './tools.js';
-import { renderMarkdown } from './format.js';
+import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
 import { enqueue } from './queue.js';
 import { onUserActivity, startProactiveLoop } from './proactive.js';
@@ -140,13 +140,16 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
 
   // Any non-command text (and/or a photo) from whitelisted users goes to the local LLM.
   log.info(`LLM request from ${senderId}: ${imagePhoto ? '[photo] ' : ''}${text.slice(0, 80)}`);
+  // The streamer sends the reply as bubbles while it generates; it's created out here so the
+  // catch block can recover whatever bubbles already landed if generation fails partway.
+  const streamer = new ReplyStreamer(client, msg.chat);
   try {
     const systemPrompt = renderSystemPrompt({ userName });
-    // Caption (if a photo) and generate under one typing indicator — both are slow model
-    // passes. Persisting the user turn happens inside so the window includes it.
+    // Caption (if a photo), generate, and stream the reply under one typing indicator — all
+    // slow model passes. Persisting the user turn happens inside so the window includes it.
     const reply = await withTyping(client, msg.chat, async () => {
       // Store the user message's Telegram id too, so /delete can revoke it in the chat.
-      const userRowId = saveMessage(chatId, 'user', text, msg.id);
+      const userRowId = saveMessage(chatId, 'user', text, [msg.id]);
       if (imagePhoto) {
         // Vision pass → caption, linked to the user row. It's injected into the window as
         // an `[image: …]` block; the chat model sees text, never the pixels.
@@ -156,20 +159,42 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
         log.info(`Image caption: ${caption.slice(0, 120)}`);
       }
       // Build the cache-friendly window (now including this message + caption) and reply,
-      // running any web_search tool calls the model makes before it answers.
-      return generateReply(systemPrompt, persistedSearchStrategy(chatId, userRowId), `chat ${chatId}`);
+      // streaming prose bubbles and running any web_search tool calls before it answers.
+      const result = await generateReply(
+        systemPrompt,
+        persistedSearchStrategy(chatId, userRowId),
+        `chat ${chatId}`,
+        streamer,
+      );
+      // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat, then flush
+      // the final bubble (or send the whole thing if nothing streamed, e.g. only a tool call).
+      const replyText = finalizeReply(result.content);
+      const ids = await streamer.finalize(replyText);
+      return { replyText, ids, model: result.model };
     });
-    // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat.
-    const replyText = finalizeReply(reply.content);
-    // Send first so we can record the message id — /reroll and /update edit it in place.
-    const sent = await client.answerText(msg, renderMarkdown(replyText));
-    saveMessage(chatId, 'assistant', replyText, sent.id, {
+    // Nothing reached the chat at all — fall through to the error path below.
+    if (reply.ids.length === 0) throw new Error('Failed to send any part of the reply');
+    // One memory row holds the whole reply; every bubble id lets /delete, /reroll and /update
+    // act on it as a unit.
+    saveMessage(chatId, 'assistant', reply.replyText, reply.ids, {
       provider: activeProviderId(),
       model: reply.model,
     });
   } catch (err) {
-    log.error('LLM error:', err);
-    await client.answerText(msg, '⚠️ Sorry, I could not get a response from the language model.');
+    // If some bubbles already streamed before the failure, persist them so memory matches the
+    // chat; only fall back to an apology when the user saw nothing at all.
+    const partialIds = streamer.ids;
+    const partialText = finalizeReply(streamer.streamedText);
+    if (partialIds.length > 0 && partialText) {
+      log.error('Reply only partially streamed:', err);
+      saveMessage(chatId, 'assistant', partialText, partialIds, {
+        provider: activeProviderId(),
+        model: null,
+      });
+    } else {
+      log.error('LLM error:', err);
+      await client.answerText(msg, '⚠️ Sorry, I could not get a response from the language model.');
+    }
   }
 }
 

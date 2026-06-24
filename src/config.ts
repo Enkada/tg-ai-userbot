@@ -146,6 +146,19 @@ export const config = {
       allowFallbacks: boolEnv('OPENROUTER_ALLOW_FALLBACKS', true),
     },
   },
+  // ---- Streaming: deliver every reply as several chat bubbles instead of one block ----
+  streaming: {
+    /**
+     * Inter-bubble pacing simulates someone typing the *next* bubble: the gap before it is
+     * `base + length × perChar`, capped at `max`. Only the idle part is waited out — if the
+     * previous send (or, in future, token generation) already took longer, the next bubble
+     * goes immediately, so the real gap is MAX(elapsed, computed delay). `base` doubles as
+     * the floor so even a one-word bubble pauses naturally rather than firing instantly.
+     */
+    delayBaseMs: numberEnv('STREAMING_DELAY_BASE_MS', 400),
+    delayPerCharMs: numberEnv('STREAMING_DELAY_PER_CHAR_MS', 30),
+    delayMaxMs: numberEnv('STREAMING_DELAY_MAX_MS', 3000),
+  },
   // ---- Tavily web search (https://app.tavily.com) — powers the bot's web_search tool ----
   tavily: {
     /** API key (tvly-…). Absent ⇒ search is disabled and the tool is never offered. */

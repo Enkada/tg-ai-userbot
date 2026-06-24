@@ -26,6 +26,7 @@ import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
 import { finalizeReply } from './tools.js';
+import { ReplyStreamer } from './send.js';
 import { getProactiveStatus, runProactiveNow } from './proactive.js';
 
 /** Display labels for chat roles, used by /prompt. */
@@ -284,7 +285,7 @@ register({
       await reply('Nothing to reroll — no previous reply.');
       return;
     }
-    if (last.tgMessageId === null) {
+    if (last.tgMessageIds === null) {
       await reply('Cannot reroll — this reply predates message-id tracking.');
       return;
     }
@@ -301,33 +302,49 @@ register({
     while (history.length && history[history.length - 1].role === 'assistant') history.pop();
 
     const systemPrompt = renderSystemPrompt({ userName });
+    const oldIds = last.tgMessageIds;
+    // A streamed reply can't be edited in place (the new reply may split into a different
+    // number of bubbles), so we replace by deletion. The swap happens the instant the first
+    // new bubble is ready: clear the old reply's bubble(s) AND the `/r` command, so the new
+    // bubbles take their place cleanly instead of appearing below `/r`. If generation fails
+    // before producing anything, this never runs and the old reply is left untouched.
+    const streamer = new ReplyStreamer(client, msg.chat, async () => {
+      await client.deleteMessagesById(msg.chat, oldIds, { revoke: true }).catch(() => {});
+      await client.deleteMessages([msg], { revoke: true }).catch(() => {});
+    });
     let regenerated: ChatResult;
     try {
-      regenerated = await withTyping(client, msg.chat, () => chat(systemPrompt, history));
+      // Reroll is a single pass — one beginPass.
+      regenerated = await withTyping(client, msg.chat, () => {
+        streamer.beginPass();
+        return chat(systemPrompt, history, streamer.onToken);
+      });
     } catch {
-      await reply('⚠️ Could not reach the language model.');
-      return;
+      // If nothing streamed, the old reply is untouched — just report. If bubbles already
+      // landed, fall through and treat what streamed as the regenerated reply.
+      if (streamer.ids.length === 0) {
+        await reply('⚠️ Could not reach the language model.');
+        return;
+      }
+      regenerated = { content: streamer.streamedText, model: null };
     }
 
     // Reroll doesn't run the search loop, so strip any tool call the model emits rather
     // than leak a raw tag into the chat (the stored search blocks still ground the reply).
     const regenText = finalizeReply(regenerated.content);
-    // Override the existing record in place (no new row), refreshing provenance to the
-    // model that just regenerated it, and edit the sent message.
-    updateMessageContent(last.id, regenText, {
-      provider: activeProviderId(),
-      model: regenerated.model,
-    });
-    try {
-      await client.editMessage({
-        chatId: msg.chat,
-        message: last.tgMessageId,
-        text: renderMarkdown(regenText),
-      });
-    } catch {
-      // Most likely MESSAGE_NOT_MODIFIED — the reroll produced an identical reply.
-      await reply('Reroll produced the same reply.');
+    const newIds = await streamer.finalize(regenText);
+    if (newIds.length === 0) {
+      await reply('⚠️ Could not send the rerolled reply.');
+      return;
     }
+    // Repoint the existing record (no new row) at the fresh bubbles, refreshing provenance
+    // to the model that just regenerated it.
+    updateMessageContent(
+      last.id,
+      regenText,
+      { provider: activeProviderId(), model: regenerated.model },
+      newIds,
+    );
   },
 });
 
@@ -347,23 +364,23 @@ register({
       await reply('Nothing to update — no previous reply.');
       return;
     }
-    if (last.tgMessageId === null) {
+    if (last.tgMessageIds === null) {
       await reply('Cannot update — this reply predates message-id tracking.');
       return;
     }
 
-    // Override the existing record in place (no new row). The text is now human-authored,
-    // so clear the provider/model provenance (pass null), then edit the sent message.
-    updateMessageContent(last.id, text, null);
+    // The replacement is verbatim user text, so it's sent as a single message — never split
+    // into bubbles. Send it first, then revoke all old bubble(s) and repoint the row at the
+    // new message. Provenance is cleared (null): the text is now human-authored.
+    let sent: Message;
     try {
-      await client.editMessage({
-        chatId: msg.chat,
-        message: last.tgMessageId,
-        text: renderMarkdown(text),
-      });
+      sent = await client.sendText(msg.chat, renderMarkdown(text));
     } catch {
-      await reply('Could not edit the message.');
+      await reply('Could not send the replacement message.');
+      return;
     }
+    await client.deleteMessagesById(msg.chat, last.tgMessageIds, { revoke: true }).catch(() => {});
+    updateMessageContent(last.id, text, null, [sent.id]);
   },
 });
 

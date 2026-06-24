@@ -11,7 +11,7 @@ import {
   type LlmProvider,
   type ProviderStatus,
   captionMessages,
-  openaiChatCompletion,
+  openaiChatCompletionStream,
   withSystem,
 } from './types.js';
 
@@ -154,8 +154,8 @@ export const openRouter: LlmProvider = {
 
   isConfigured: () => Boolean(cfg.apiKey),
 
-  async chat(systemPrompt, history) {
-    return openaiChatCompletion({
+  async chat(systemPrompt, history, onToken) {
+    return openaiChatCompletionStream({
       url: CHAT_URL,
       headers: authHeaders(),
       model: cfg.model,
@@ -165,25 +165,13 @@ export const openRouter: LlmProvider = {
       timeoutMs: gen.timeoutMs,
       extraBody: EXTRA_BODY,
       label: 'OpenRouter',
-    });
-  },
-
-  async complete(messages, opts) {
-    return openaiChatCompletion({
-      url: CHAT_URL,
-      headers: authHeaders(),
-      model: cfg.model,
-      messages,
-      temperature: opts.temperature,
-      maxTokens: opts.maxTokens,
-      timeoutMs: gen.timeoutMs,
-      extraBody: EXTRA_BODY,
-      label: 'OpenRouter gate',
+      onToken,
     });
   },
 
   async describeImage(base64, mime = 'image/jpeg') {
-    const { content: caption } = await openaiChatCompletion({
+    // No sink: the SSE stream is just collected into the full caption.
+    const { content: caption } = await openaiChatCompletionStream({
       url: CHAT_URL,
       headers: authHeaders(),
       model: cfg.model,

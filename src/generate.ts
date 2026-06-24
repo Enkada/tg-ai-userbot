@@ -22,6 +22,7 @@ import { chat, type ChatMessage, type ChatResult } from './llm.js';
 import { getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
 import { isSearchConfigured, webSearch } from './search.js';
 import { parseToolCall } from './tools.js';
+import type { ReplyStreamer } from './send.js';
 
 const log = createLogger('generate');
 
@@ -42,13 +43,24 @@ export interface ToolLoopStrategy {
  * records it, and the model is asked again — now grounded — until it answers in prose or the
  * per-turn cap is hit. When search is unconfigured there are no tools, so this is one call.
  * `label` is a short context tag for log lines (e.g. `chat 42`, `proactive chat 42`).
+ *
+ * When a {@link ReplyStreamer} is supplied it's threaded in as the token sink so prose is sent
+ * to the chat as it generates. Each completion is a fresh pass ({@link ReplyStreamer.beginPass}),
+ * so the streamer suppresses the intermediate tool-call passes and streams only the final prose.
+ * The caller still gets the full {@link ChatResult} back to finalize and persist.
  */
 export async function generateReply(
   systemPrompt: string,
   strategy: ToolLoopStrategy,
   label: string,
+  streamer?: ReplyStreamer,
 ): Promise<ChatResult> {
-  let result = await chat(systemPrompt, strategy.buildHistory());
+  const run = (): Promise<ChatResult> => {
+    streamer?.beginPass();
+    return chat(systemPrompt, strategy.buildHistory(), streamer?.onToken);
+  };
+
+  let result = await run();
   if (!isSearchConfigured()) return result;
 
   const max = config.tavily.maxSearchesPerTurn;
@@ -67,7 +79,7 @@ export async function generateReply(
       summary = 'search failed — no results available right now.';
     }
     strategy.recordSearch(searchCount, query, summary);
-    result = await chat(systemPrompt, strategy.buildHistory());
+    result = await run();
   }
   return result;
 }

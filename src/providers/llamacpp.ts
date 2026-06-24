@@ -5,11 +5,10 @@
  */
 import { config } from '../config.js';
 import {
-  type ChatMessage,
   type LlmProvider,
   type ProviderStatus,
   captionMessages,
-  openaiChatCompletion,
+  openaiChatCompletionStream,
   withSystem,
 } from './types.js';
 
@@ -48,8 +47,8 @@ export const llamaCpp: LlmProvider = {
   // Local server is always "configured"; whether it's reachable is what status() reports.
   isConfigured: () => true,
 
-  async chat(systemPrompt, history) {
-    return openaiChatCompletion({
+  async chat(systemPrompt, history, onToken) {
+    return openaiChatCompletionStream({
       url: CHAT_URL,
       model: cfg.model,
       messages: withSystem(systemPrompt, history),
@@ -58,24 +57,13 @@ export const llamaCpp: LlmProvider = {
       timeoutMs: gen.timeoutMs,
       extraBody: REASONING_OFF,
       label: 'LLM',
-    });
-  },
-
-  async complete(messages, opts) {
-    return openaiChatCompletion({
-      url: CHAT_URL,
-      model: cfg.model,
-      messages,
-      temperature: opts.temperature,
-      maxTokens: opts.maxTokens,
-      timeoutMs: gen.timeoutMs,
-      extraBody: REASONING_OFF,
-      label: 'Gate',
+      onToken,
     });
   },
 
   async describeImage(base64, mime = 'image/jpeg') {
-    const { content: caption } = await openaiChatCompletion({
+    // No sink: the SSE stream is just collected into the full caption.
+    const { content: caption } = await openaiChatCompletionStream({
       url: CHAT_URL,
       model: cfg.model,
       messages: captionMessages(base64, mime),
