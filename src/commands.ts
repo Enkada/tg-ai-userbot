@@ -387,13 +387,12 @@ register({
 register({
   name: 'proactive',
   aliases: ['pro'],
-  description: 'Show the proactive schedule; /proactive test | followup previews an opener now',
+  description: 'Show the proactive schedule; /proactive test previews a reach-out now',
   handler: async ({ client, reply, chatId, userName, args }) => {
     const sub = args[0]?.toLowerCase();
-    if (sub === 'test' || sub === 'followup') {
-      const kind = sub === 'followup' ? 'followup' : 'reachout';
-      const result = await runProactiveNow(client, chatId, userName, kind);
-      await reply(md(`🛎️ **Proactive ${sub}**\n${result}`));
+    if (sub === 'test') {
+      const result = await runProactiveNow(client, chatId, userName);
+      await reply(md(`🛎️ **Proactive test**\n${result}`));
       return;
     }
     await reply(md(`🛎️ **Proactive**\n${getProactiveStatus(chatId)}`));

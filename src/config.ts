@@ -191,8 +191,15 @@ export const config = {
      * after the user goes quiet. Each *unanswered* reach-out then adds `escalationStepMinutes`
      * to the next gap (so they thin out the longer she's ignored).
      */
-    silenceMinMinutes: numberEnv('PROACTIVE_SILENCE_MIN', 60),
-    silenceMaxMinutes: numberEnv('PROACTIVE_SILENCE_MAX', 90),
+    silenceMinMinutes: numberEnv('PROACTIVE_SILENCE_MIN', 45),
+    silenceMaxMinutes: numberEnv('PROACTIVE_SILENCE_MAX', 180),
+    /**
+     * Right-skew exponent for the base gap pick. The gap is `min + span * random()**skew`:
+     * skew = 1 is flat/uniform; skew > 1 clusters gaps toward the short end with a long tail
+     * toward the max (so she usually pings within a couple hours but sometimes leaves you alone
+     * much longer — burstier and less learnable than a fixed band). Default 2.
+     */
+    silenceSkew: numberEnv('PROACTIVE_SILENCE_SKEW', 2),
     /** Minutes added to the gap per already-ignored reach-out (the escalation step). */
     escalationStepMinutes: numberEnv('PROACTIVE_ESCALATION_STEP', 60),
     /**
@@ -200,18 +207,9 @@ export const config = {
      * openers, not even the next morning's greeting — until the user replies (which resets it).
      */
     maxIgnored: numberEnv('PROACTIVE_MAX_IGNORED', 8),
-    // ---- Follow-ups: continuing the conversation when the user goes briefly quiet ----
-    /** Probability (0–1) that a due follow-up actually fires. Rolled once; on a miss, nothing. */
-    followupChance: numberEnv('PROACTIVE_FOLLOWUP_CHANCE', 0.85),
-    /** Follow-up timer: fires this many minutes (random in range) after the user's last message. */
-    followupMinMinutes: numberEnv('PROACTIVE_FOLLOWUP_MIN', 2),
-    followupMaxMinutes: numberEnv('PROACTIVE_FOLLOWUP_MAX', 3),
-    /** Active-hours window for follow-ups (local hours): only continue a chat while start ≤ hour < end. */
-    followupWindowStartHour: numberEnv('PROACTIVE_FOLLOWUP_WINDOW_START', 9),
-    followupWindowEndHour: numberEnv('PROACTIVE_FOLLOWUP_WINDOW_END', 21),
     /**
-     * How often the scheduler evaluates each chat (ms). Default 1 min so the short follow-up
-     * timer has fine enough granularity; the tick is cheap (a DB read, no LLM call).
+     * How often the scheduler evaluates each chat (ms). Default 1 min — fine enough granularity
+     * for the reach-out gaps; the tick is cheap (a DB read, no LLM call).
      */
     tickMs: numberEnv('PROACTIVE_TICK_MS', 60_000),
   },

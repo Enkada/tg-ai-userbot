@@ -135,10 +135,9 @@ export const proactiveState = sqliteTable('proactive_state', {
    */
   ignoredCount: integer('ignored_count').notNull().default(0),
   /**
-   * Epoch ms when a follow-up becomes due — a short timer started on user activity that, if
-   * the user stays quiet, makes the bot continue the conversation once. NULL means none is
-   * pending (consumed after one shot; re-armed by the next user message). Independent of the
-   * proactive schedule above: it never touches `ignoredCount`.
+   * Dead column — the short mid-conversation "follow-up" timer was removed (it nagged more than
+   * it helped; reach-outs cover continuation on a humane timescale). Kept nullable and unwritten
+   * to avoid a migration; safe to drop in a future schema change.
    */
   followupDueAt: integer('followup_due_at'),
   /** Cached display name of the peer, for the {{user}} tag when generating an opener. */
