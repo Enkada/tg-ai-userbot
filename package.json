@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",
+  "packageManager": "pnpm@11.5.1",
   "scripts": {
     "login": "tsx src/login.ts",
     "dev": "tsx watch src/index.ts",

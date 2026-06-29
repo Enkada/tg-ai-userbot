@@ -5,7 +5,7 @@
 // stale compiled JS because `git pull` updated src/ but the `tsc` build step was
 // skipped, so the bot silently ran old code (the proactive follow-up feature never
 // fired). With no build artifact there is nothing to drift out of sync — deploy is
-// just `git pull` (+ `npm install` if deps changed) and a restart.
+// just `git pull` (+ `pnpm install` if deps changed) and a restart.
 //
 // App configuration lives in the server's .env (loaded by dotenv at startup). Do NOT
 // add app config keys to the `env` block below: dotenv does not override variables
