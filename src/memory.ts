@@ -4,6 +4,7 @@ import { attachments, messages, proactiveState, searches, summaries, summaryStat
 import type { ProactiveStateRow, SummaryStateRow } from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
+import { sanitize } from './sanitize.js';
 
 /** Minimum number of recent messages always kept in the context window. */
 export const MIN_WINDOW = 60;
@@ -63,7 +64,9 @@ export function saveMessage(
     .values({
       chatId,
       role,
-      content,
+      // DB-write seam of the "anti-AI" cleanup: store the plain-keyboard form so the record
+      // matches what was sent and every later reader (window, /dump, summarizer) sees it clean.
+      content: sanitize(content),
       tgMessageIds,
       provider: source?.provider,
       model: source?.model,
@@ -218,10 +221,11 @@ export function updateMessageContent(
   source?: GenerationSource | null,
   tgMessageIds?: number[],
 ): void {
+  const clean = sanitize(content);
   const patch: Record<string, unknown> =
     source === undefined
-      ? { content }
-      : { content, provider: source?.provider ?? null, model: source?.model ?? null };
+      ? { content: clean }
+      : { content: clean, provider: source?.provider ?? null, model: source?.model ?? null };
   if (tgMessageIds !== undefined) patch.tgMessageIds = tgMessageIds;
   db.update(messages).set(patch).where(eq(messages.id, id)).run();
 }
@@ -304,10 +308,14 @@ export function getWindow(chatId: number): ChatMessage[] {
 
   return rows.map(({ id, role, content }) => ({
     role,
-    // Captions precede the text; search results follow it.
-    content: withSearches(
-      withCaptions(content, captionsByMessage.get(id) ?? []),
-      searchesByMessage.get(id) ?? [],
+    // Captions precede the text; search results follow it. Sanitize the composed turn (window-
+    // build seam of the cleanup) so legacy rows from before the feature — and the typographic
+    // tells in model-written captions / external search text — reach the LLM in plain form too.
+    content: sanitize(
+      withSearches(
+        withCaptions(content, captionsByMessage.get(id) ?? []),
+        searchesByMessage.get(id) ?? [],
+      ),
     ),
   }));
 }
@@ -418,9 +426,12 @@ export function getDayMessages(chatId: number, start: number, end: number): Chat
 
   return rows.map(({ id, role, content }) => ({
     role,
-    content: withSearches(
-      withCaptions(content, captionsByMessage.get(id) ?? []),
-      searchesByMessage.get(id) ?? [],
+    // Same window-build cleanup as getWindow: hand the summarizer plain-keyboard text.
+    content: sanitize(
+      withSearches(
+        withCaptions(content, captionsByMessage.get(id) ?? []),
+        searchesByMessage.get(id) ?? [],
+      ),
     ),
   }));
 }
