@@ -11,6 +11,9 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
   key is configured. The provider is chosen once, at startup.
 - **Conversation memory**: every user/AI message is stored in SQLite (Drizzle ORM).
   The model is given a cache-friendly context window (see below).
+- **Long-term memory** (opt-in): each conversation day is compressed overnight into a short
+  first-person diary entry; the newest few are injected into the system prompt as a `# Memory`
+  block, so the character recalls past days beyond the live window (see below).
 - Renders **Markdown** in replies (bold, code, links…).
 - Shows a live **"typing…"** status while the model generates (refreshed every ~5s).
 - Marks incoming messages as **read** on arrival.
@@ -62,12 +65,13 @@ alternating user/assistant turns, so two `user` (or two `assistant`) objects in 
 make the template throw or produce a malformed prompt — which happens naturally after
 `/delete`-ing a reply, or when several messages arrive back-to-back.
 
-The system prompt is assembled from three layers, in order:
+The system prompt is assembled from these layers, in order:
 
 | Layer | File | Owner | Notes |
 | ----- | ---- | ----- | ----- |
 | Persona | `prompts/persona.txt` | **user** (git-ignored) | Who the character is + chat style. Created from `persona.default.txt` on first run, then yours to edit. Never overwritten by app updates. |
 | Technical | `prompts/technical.txt` | app | Current literal app limits (no audio/video/files yet) + dynamic context. Evolves as features land. |
+| Memory | _(generated)_ | app | The newest daily summaries for this chat as a `# Memory` block (see below). Per-chat and dynamic; omitted when there are none. |
 | Tools | `prompts/tools.txt` | app | The tool-call protocol scaffold; its `{{tools}}` tag is filled with the available tools, and the whole layer is omitted when no tool is configured. |
 
 `persona.default.txt` is the shipped, neutral starting persona (and the source for a future
@@ -87,6 +91,30 @@ All layers support `{{tag}}` placeholders that are substituted per message:
 Unknown tags are left as-is. Because `{{date}}`/`{{day}}`/`{{period}}` change over time,
 they shift the cached prompt prefix at those boundaries (e.g. when the period flips) —
 expected, given they're meant to be dynamic.
+
+### Long-term memory (daily summaries)
+
+The context window only holds the last ~60–79 messages. To remember further back, a scheduler
+(`src/summary.ts`) compresses each finished day of conversation into a short first-person diary
+entry — `Headline` / `Happened` / `Mood` / `Follow-ups` — and the newest `SUMMARY_MAX_KEPT`
+entries are injected as the **`# Memory`** layer above. Off by default (`SUMMARY_ENABLED=true`);
+always runs through **OpenRouter** (`SUMMARY_MODEL`, default `google/gemini-2.5-flash-lite`),
+independent of the active chat provider, so it has full context regardless of the local model.
+
+- **Logical day**: a "day" runs `SUMMARY_CUTOFF_HOUR`→cutoff (default 3am→3am, in `TIMEZONE`),
+  so a late-night session crossing midnight stays in one entry instead of being split.
+- **When**: a day is summarized only after it has fully ended and only if it holds more than
+  `SUMMARY_MIN_MESSAGES` messages. The scheduler is a plain interval (`SUMMARY_TICK_MS`), not tied
+  to the message queue — it reads completed, immutable past days, so it never races a live reply.
+- **State** (`summary_state`) lives in the DB, so the schedule survives restarts and catches up on
+  any day missed during downtime. Existing history from before the feature is switched on is **not**
+  back-filled — the day you enable it becomes the first entry.
+- `/reset` and `/clear` soft-delete a chat's summaries along with its messages.
+- **Reactive replies only**: the `# Memory` block is withheld from proactive openers. With no
+  user message to anchor on, an opener otherwise fixates on the single most salient summary and
+  rehashes it every reach-out; openers still carry the live recent-message window for short-term
+  continuity.
+- Roll-ups (weekly/monthly tiers, the `level` column) are reserved but not produced yet.
 
 ## Stack
 

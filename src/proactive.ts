@@ -130,7 +130,10 @@ async function sendOpener(
   userName: string,
   label: string,
 ): Promise<void> {
-  const systemPrompt = renderSystemPrompt({ userName });
+  // Openers omit the long-term-memory block: with no user message to anchor on, the model
+  // fixates on the most salient summary and rehashes it every reach-out (see renderSystemPrompt).
+  // The live recent-message window still grounds short-term continuity.
+  const systemPrompt = renderSystemPrompt({ userName, chatId }, { includeMemory: false });
   const peer: InputPeerLike = chatId;
   const streamer = new ReplyStreamer(client, peer);
   let reply: ChatResult;

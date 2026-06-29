@@ -213,6 +213,35 @@ export const config = {
      */
     tickMs: numberEnv('PROACTIVE_TICK_MS', 60_000),
   },
+  // ---- Long-term memory: nightly per-day summaries appended to the system prompt ----
+  summary: {
+    /**
+     * Master switch. Also requires `OPENROUTER_API_KEY` — summaries always run through
+     * OpenRouter (full context, always reachable), independent of the active chat provider.
+     */
+    enabled: boolEnv('SUMMARY_ENABLED', false),
+    /** Model slug used only for summaries. Default: the cheapest faithful summarizer we tested. */
+    model: process.env.SUMMARY_MODEL ?? 'google/gemini-2.5-flash-lite',
+    /** App-owned summarizer system prompt (first-person diary voice). */
+    promptPath: process.env.SUMMARY_PROMPT_PATH ?? 'prompts/summary.txt',
+    /** A logical day is only summarized when it holds MORE than this many non-deleted messages. */
+    minMessages: numberEnv('SUMMARY_MIN_MESSAGES', 10),
+    /** How many of the newest daily summaries are injected into the system prompt. */
+    maxKept: numberEnv('SUMMARY_MAX_KEPT', 7),
+    /**
+     * Logical-day boundary (local hour, 0-23): a "day" runs cutoff→cutoff, so a late-night
+     * session that crosses midnight stays in one summary. Default 3am.
+     */
+    cutoffHour: numberEnv('SUMMARY_CUTOFF_HOUR', 3),
+    /** How often the scheduler checks for a completed, un-summarized day (ms). Default 10 min. */
+    tickMs: numberEnv('SUMMARY_TICK_MS', 600_000),
+    /** Low — summaries should be faithful, not creative. */
+    temperature: numberEnv('SUMMARY_TEMPERATURE', 0.3),
+    /** Hard cap on a summary's length. */
+    maxTokens: numberEnv('SUMMARY_MAX_TOKENS', 400),
+    /** Per-request timeout (ms). */
+    timeoutMs: numberEnv('SUMMARY_TIMEOUT_MS', 60_000),
+  },
 } as const;
 
 if (!Number.isInteger(config.apiId)) {

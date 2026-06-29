@@ -1,7 +1,7 @@
-import { and, asc, count, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, lt } from 'drizzle-orm';
 import { db } from './db/index.js';
-import { attachments, messages, proactiveState, searches } from './db/schema.js';
-import type { ProactiveStateRow } from './db/schema.js';
+import { attachments, messages, proactiveState, searches, summaries, summaryState } from './db/schema.js';
+import type { ProactiveStateRow, SummaryStateRow } from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
 
@@ -365,12 +365,177 @@ export function deleteLastMessages(chatId: number, n: number): DeleteResult {
   return { flagged: rows.length, tgMessageIds };
 }
 
-/** Soft-deletes all messages for a chat (sets `deleted`). Returns how many were flagged. */
+// ---- Long-term memory: per-day summaries ------------------------------------------------
+
+/**
+ * All non-deleted messages of a chat in the logical-day range `[start, end)` (oldest → newest),
+ * with image captions and web-search results rendered inline exactly as in {@link getWindow}.
+ * Unlike `getWindow` this is uncapped — a whole day, however long — because it feeds the
+ * summarizer, not the live context window.
+ */
+export function getDayMessages(chatId: number, start: number, end: number): ChatMessage[] {
+  const rows = db
+    .select({ id: messages.id, role: messages.role, content: messages.content })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.chatId, chatId),
+        eq(messages.deleted, false),
+        gte(messages.createdAt, start),
+        lt(messages.createdAt, end),
+      ),
+    )
+    .orderBy(asc(messages.id))
+    .all();
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((r) => r.id);
+
+  const captionsByMessage = new Map<number, string[]>();
+  for (const a of db
+    .select({ messageId: attachments.messageId, caption: attachments.caption })
+    .from(attachments)
+    .where(inArray(attachments.messageId, ids))
+    .orderBy(asc(attachments.messageId), asc(attachments.idx))
+    .all()) {
+    const list = captionsByMessage.get(a.messageId);
+    if (list) list.push(a.caption);
+    else captionsByMessage.set(a.messageId, [a.caption]);
+  }
+
+  const searchesByMessage = new Map<number, SearchEntry[]>();
+  for (const s of db
+    .select({ messageId: searches.messageId, query: searches.query, summary: searches.summary })
+    .from(searches)
+    .where(inArray(searches.messageId, ids))
+    .orderBy(asc(searches.messageId), asc(searches.idx))
+    .all()) {
+    const entry = { query: s.query, summary: s.summary };
+    const list = searchesByMessage.get(s.messageId);
+    if (list) list.push(entry);
+    else searchesByMessage.set(s.messageId, [entry]);
+  }
+
+  return rows.map(({ id, role, content }) => ({
+    role,
+    content: withSearches(
+      withCaptions(content, captionsByMessage.get(id) ?? []),
+      searchesByMessage.get(id) ?? [],
+    ),
+  }));
+}
+
+/** Count of non-deleted messages in a chat within the logical-day range `[start, end)`. */
+export function messageCountInRange(chatId: number, start: number, end: number): number {
+  const row = db
+    .select({ c: count() })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.chatId, chatId),
+        eq(messages.deleted, false),
+        gte(messages.createdAt, start),
+        lt(messages.createdAt, end),
+      ),
+    )
+    .get();
+  return row?.c ?? 0;
+}
+
+/** True if a summary row already exists for this chat/level/period (regardless of soft-delete). */
+export function summaryExists(chatId: number, level: number, periodStart: number): boolean {
+  const row = db
+    .select({ c: count() })
+    .from(summaries)
+    .where(
+      and(
+        eq(summaries.chatId, chatId),
+        eq(summaries.level, level),
+        eq(summaries.periodStart, periodStart),
+      ),
+    )
+    .get();
+  return (row?.c ?? 0) > 0;
+}
+
+/** Inserts one summary row. */
+export function saveSummary(
+  chatId: number,
+  level: number,
+  periodStart: number,
+  periodEnd: number,
+  content: string,
+): void {
+  db.insert(summaries).values({ chatId, level, periodStart, periodEnd, content }).run();
+}
+
+/** One stored summary, for injection into the system prompt. */
+export interface SummaryEntry {
+  periodStart: number;
+  content: string;
+}
+
+/**
+ * The newest `limit` level-0 (daily) summaries for a chat, returned oldest → newest so they
+ * read chronologically when stacked in the `# Memory` block. Excludes soft-deleted rows.
+ */
+export function getRecentSummaries(chatId: number, limit: number): SummaryEntry[] {
+  const rows = db
+    .select({ periodStart: summaries.periodStart, content: summaries.content })
+    .from(summaries)
+    .where(
+      and(eq(summaries.chatId, chatId), eq(summaries.level, 0), eq(summaries.deleted, false)),
+    )
+    .orderBy(desc(summaries.periodStart))
+    .limit(limit)
+    .all();
+  rows.reverse();
+  return rows;
+}
+
+/** Current summary-scheduler state for a chat, or null if none has been recorded yet. */
+export function getSummaryState(chatId: number): SummaryStateRow | null {
+  return (
+    db.select().from(summaryState).where(eq(summaryState.chatId, chatId)).limit(1).get() ?? null
+  );
+}
+
+/** Advances the scheduler cursor (`lastDoneStart`) for a chat. */
+export function setSummaryCursor(chatId: number, lastDoneStart: number): void {
+  const now = Date.now();
+  db.insert(summaryState)
+    .values({ chatId, lastDoneStart, updatedAt: now })
+    .onConflictDoUpdate({ target: summaryState.chatId, set: { lastDoneStart, updatedAt: now } })
+    .run();
+}
+
+/**
+ * Caches the peer's display name for the summarizer, without touching the scheduler cursor.
+ * Called on every incoming message (independent of the proactive feature) so the off-line
+ * summary job can name the user even when proactivity is off.
+ */
+export function rememberUserName(chatId: number, userName: string): void {
+  const now = Date.now();
+  db.insert(summaryState)
+    .values({ chatId, userName, updatedAt: now })
+    .onConflictDoUpdate({ target: summaryState.chatId, set: { userName, updatedAt: now } })
+    .run();
+}
+
+/**
+ * Soft-deletes all messages for a chat (sets `deleted`), and the chat's summaries with them —
+ * a reset wipes recalled long-term memory too, not just the live window. Returns how many
+ * message rows were flagged (the figure /reset reports).
+ */
 export function resetMemory(chatId: number): number {
   const res = db
     .update(messages)
     .set({ deleted: true })
     .where(and(eq(messages.chatId, chatId), eq(messages.deleted, false)))
+    .run();
+  db.update(summaries)
+    .set({ deleted: true })
+    .where(and(eq(summaries.chatId, chatId), eq(summaries.deleted, false)))
     .run();
   return res.changes;
 }

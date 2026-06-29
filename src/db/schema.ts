@@ -149,3 +149,68 @@ export const proactiveState = sqliteTable('proactive_state', {
 });
 
 export type ProactiveStateRow = typeof proactiveState.$inferSelect;
+
+/**
+ * Long-term memory: one compressed summary per period. Level 0 is a "daily" — a diary entry
+ * for one logical day (see {@link dayStart}); higher levels are reserved for future weekly/
+ * monthly roll-ups and aren't written yet. The newest {@link config.summary.maxKept} level-0
+ * rows are injected into the system prompt as a `# Memory` block when the window is built.
+ *
+ * `periodStart`/`periodEnd` are the logical day's epoch-ms bounds (`[start, end)`), used both
+ * as the dedup key (one row per chat+level+periodStart) and to date-stamp the entry at render.
+ * Soft-deleted like {@link messages} — `/reset` and `/clear` flag instead of removing, so a
+ * reset wipes recalled memory too.
+ */
+export const summaries = sqliteTable(
+  'summaries',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Telegram chat (peer) id — same key as {@link messages.chatId}. */
+    chatId: integer('chat_id').notNull(),
+    /** Tier: 0 = daily. 1/2 (weekly/monthly) reserved; not produced yet. */
+    level: integer('level').notNull().default(0),
+    /** Epoch ms of the logical day's start (its cutoff boundary). The dedup key with chat+level. */
+    periodStart: integer('period_start').notNull(),
+    /** Epoch ms of the logical day's end (exclusive). */
+    periodEnd: integer('period_end').notNull(),
+    /** The summarizer's output (Headline/Happened/Mood/Follow-ups, in {@link char}'s first-person voice). */
+    content: text('content').notNull(),
+    /** Soft-delete flag. Set by /reset and /clear; excluded from the injected memory block. */
+    deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
+    /** Epoch milliseconds. */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_summaries_chat').on(t.chatId, t.level, t.deleted, t.periodStart)],
+);
+
+export type SummaryRow = typeof summaries.$inferSelect;
+
+/**
+ * Per-chat bookkeeping for the summary scheduler. One row per chat.
+ *
+ * `lastDoneStart` is the `periodStart` of the most recent logical day the scheduler has
+ * finished with (summarized *or* skipped as too short) — a cursor it advances forward so it
+ * never re-checks a day twice and auto-catches-up after downtime. NULL means "not activated
+ * yet": on the first tick the scheduler stamps it to the *previous* day's start, so existing
+ * history is never back-filled — the day the feature is switched on becomes the first summary.
+ *
+ * `userName` caches the peer's display name (written on every message, independent of the
+ * proactive feature) so the off-line summarizer can address {@link config.character} by name
+ * in the transcript even when proactivity is disabled.
+ */
+export const summaryState = sqliteTable('summary_state', {
+  /** Telegram chat (peer) id. */
+  chatId: integer('chat_id').primaryKey(),
+  /** Cursor: epoch-ms start of the last logical day processed. NULL until first activation. */
+  lastDoneStart: integer('last_done_start'),
+  /** Cached display name of the peer, for the transcript's user turns. */
+  userName: text('user_name'),
+  /** Epoch ms of the last update. */
+  updatedAt: integer('updated_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type SummaryStateRow = typeof summaryState.$inferSelect;

@@ -213,6 +213,32 @@ export const openRouter: LlmProvider = {
   },
 };
 
+/**
+ * One-shot summarization call, used by the long-term-memory scheduler. Deliberately separate
+ * from {@link openRouter.chat}: it targets a dedicated model ({@link config.summary.model}, not
+ * the chat slug), is non-streaming, carries no `web_search` tools, and — crucially — omits the
+ * chat path's upstream {@link PROVIDER_ROUTING} (that order is tuned for the Gemma chat model and
+ * would mis-route the summarizer). Throws if OpenRouter isn't configured or the call fails.
+ */
+export async function summarize(systemPrompt: string, transcript: string): Promise<string> {
+  if (!cfg.apiKey) throw new Error('Summary requires OpenRouter (OPENROUTER_API_KEY is missing)');
+  const { content } = await openaiChatCompletionStream({
+    url: CHAT_URL,
+    headers: authHeaders(),
+    model: config.summary.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: transcript },
+    ],
+    temperature: config.summary.temperature,
+    maxTokens: config.summary.maxTokens,
+    timeoutMs: config.summary.timeoutMs,
+    extraBody: { reasoning: { enabled: false } },
+    label: 'Summary',
+  });
+  return content;
+}
+
 /** The active upstream routing preference, as configured. */
 export interface RoutingInfo {
   order: string[];

@@ -301,7 +301,7 @@ register({
     const history = getWindow(chatId);
     while (history.length && history[history.length - 1].role === 'assistant') history.pop();
 
-    const systemPrompt = renderSystemPrompt({ userName });
+    const systemPrompt = renderSystemPrompt({ userName, chatId });
     const oldIds = last.tgMessageIds;
     // A streamed reply can't be edited in place (the new reply may split into a different
     // number of bubbles), so we replace by deletion. The swap happens the instant the first
@@ -406,7 +406,7 @@ register({
   handler: async ({ reply, chatId, userName }) => {
     const info = getWindowInfo(chatId);
     const window = getWindow(chatId);
-    const systemPrompt = renderSystemPrompt({ userName });
+    const systemPrompt = renderSystemPrompt({ userName, chatId });
 
     let used: number | null = null;
     try {
@@ -452,7 +452,7 @@ register({
   aliases: ['p'],
   description: 'Show the prompt the LLM receives (system, then first 2 + last 3 messages)',
   handler: async ({ reply, chatId, userName }) => {
-    const systemPrompt = renderSystemPrompt({ userName });
+    const systemPrompt = renderSystemPrompt({ userName, chatId });
     const conversation = getWindow(chatId);
 
     // Telegram caps messages at 4096 chars; keep each <pre> block under that. The system

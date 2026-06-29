@@ -5,13 +5,14 @@ import { resolveCommand, parseCommand, type CommandContext } from './commands.js
 import { activeProviderId, describeImage, getVisionSupport, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
-import { saveAttachment, saveMessage } from './memory.js';
+import { rememberUserName, saveAttachment, saveMessage } from './memory.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
 import { finalizeReply } from './tools.js';
 import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
 import { enqueue } from './queue.js';
 import { onUserActivity, startProactiveLoop } from './proactive.js';
+import { startSummaryLoop } from './summary.js';
 
 const log = createLogger('bot');
 const startedAt = Date.now();
@@ -82,6 +83,8 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   // The user is active: reset the proactive silence timer (and cache their name). Covers
   // commands too — any interaction counts as "they're here", so don't reach out right now.
   onUserActivity(chatId, userName);
+  // Cache the name for the off-line summarizer too (independent of the proactive feature).
+  rememberUserName(chatId, userName);
   // A photo's caption is never treated as a slash command — commands are text-only.
   const parsed = photo ? null : parseCommand(text);
 
@@ -144,7 +147,7 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   // catch block can recover whatever bubbles already landed if generation fails partway.
   const streamer = new ReplyStreamer(client, msg.chat);
   try {
-    const systemPrompt = renderSystemPrompt({ userName });
+    const systemPrompt = renderSystemPrompt({ userName, chatId });
     // Caption (if a photo), generate, and stream the reply under one typing indicator — all
     // slow model passes. Persisting the user turn happens inside so the window includes it.
     const reply = await withTyping(client, msg.chat, async () => {
@@ -224,6 +227,9 @@ async function main(): Promise<void> {
 
   // Start the proactive scheduler (no-op unless PROACTIVE_ENABLED=true).
   if (config.proactive.enabled) startProactiveLoop(client);
+
+  // Start the long-term-memory summarizer (no-op unless SUMMARY_ENABLED=true + OpenRouter set).
+  startSummaryLoop();
 
   log.info('UserBot is online and listening for messages.');
 }
