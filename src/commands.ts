@@ -10,7 +10,12 @@ import {
   type ChatMessage,
   type ChatResult,
 } from './llm.js';
-import { renderSystemPrompt } from './prompt.js';
+import {
+  renderMemoryBlock,
+  renderPersona,
+  renderSystemPrompt,
+  renderTechnical,
+} from './prompt.js';
 import {
   deleteLastMessages,
   getLastAssistant,
@@ -25,7 +30,7 @@ import {
 import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
-import { finalizeReply } from './tools.js';
+import { finalizeReply, renderToolsBlock } from './tools.js';
 import { ReplyStreamer } from './send.js';
 import { getProactiveStatus, runProactiveNow } from './proactive.js';
 
@@ -58,6 +63,11 @@ export interface CommandContext {
    * `client.answerText` in command handlers.
    */
   reply: (content: InputText) => Promise<Message>;
+  /**
+   * Sends a file as command output (tracked for auto-deletion like {@link reply}). Used by
+   * `/dump` to deliver the full prompt as a `.md` document instead of an in-chat message.
+   */
+  replyDocument: (content: Buffer, fileName: string, caption?: InputText) => Promise<Message>;
 }
 
 export interface Command {
@@ -447,46 +457,159 @@ ${source}`),
   },
 });
 
+/** The slices of the LLM prompt that `/prompt` can show, one at a time. */
+type PromptPart = 'persona' | 'technical' | 'tools' | 'summaries' | 'chat';
+
+/** Maps the argument the user types to a part. `/prompt` with no arg defaults to `persona`. */
+const PROMPT_PART_ALIASES: Record<string, PromptPart> = {
+  p: 'persona',
+  persona: 'persona',
+  tech: 'technical',
+  technical: 'technical',
+  t: 'tools',
+  tools: 'tools',
+  s: 'summaries',
+  summary: 'summaries',
+  summaries: 'summaries',
+  c: 'chat',
+  chat: 'chat',
+  history: 'chat',
+  conversation: 'chat',
+};
+
+/** The `/prompt h` help text: the part menu, plus a pointer to `/dump` for the whole thing. */
+const PROMPT_HELP = md(`**🧩 /prompt** \`<part>\` — show one slice of the prompt the LLM receives
+\`p\` — persona (default)
+\`tech\` — technical layer
+\`t\` — tools block
+\`s\` — summaries (memory)
+\`c\` — chat window (first 3 + last 6)
+\`h\` — this help
+
+Use \`/dump\` for the full prompt as a \`.md\` file.`);
+
+/**
+ * Renders the chat window the way the LLM-facing window is shaped, but elided for a quick peek:
+ * the first {@link HEAD} and last {@link TAIL} messages, with `[Role]` tags, and a marker for the
+ * middle that's omitted. `/dump` shows the window in full; this is the at-a-glance version.
+ */
+function renderChatPeek(conversation: ChatMessage[]): string {
+  if (conversation.length === 0) return '(no conversation yet)';
+  const HEAD = 3;
+  const TAIL = 6;
+  const parts: ChatMessage[] =
+    conversation.length <= HEAD + TAIL
+      ? conversation
+      : [
+          ...conversation.slice(0, HEAD),
+          { role: 'system', content: `… (${conversation.length - HEAD - TAIL} messages omitted) …` },
+          ...conversation.slice(-TAIL),
+        ];
+  return parts
+    .map((m) =>
+      m.role === 'system' && m.content.startsWith('…')
+        ? m.content
+        : `[${ROLE_LABELS[m.role]}]\n${m.content}`,
+    )
+    .join('\n\n');
+}
+
 register({
   name: 'prompt',
   aliases: ['p'],
-  description: 'Show the prompt the LLM receives (system, then first 2 + last 3 messages)',
-  handler: async ({ reply, chatId, userName }) => {
+  description: 'Show one slice of the LLM prompt: /p [p|tech|t|s|c|h] (default persona)',
+  handler: async ({ reply, chatId, userName, args }) => {
+    const arg = args[0]?.toLowerCase();
+    if (arg === 'h' || arg === 'help') {
+      await reply(PROMPT_HELP);
+      return;
+    }
+    // No arg → persona; an unknown arg → the help menu (rather than guessing a part).
+    const part = arg === undefined ? 'persona' : PROMPT_PART_ALIASES[arg];
+    if (!part) {
+      await reply(PROMPT_HELP);
+      return;
+    }
+
+    const ctx = { userName, chatId };
+    let label: string;
+    let body: string;
+    switch (part) {
+      case 'persona':
+        label = 'Persona';
+        body = renderPersona(ctx);
+        break;
+      case 'technical':
+        label = 'Technical';
+        body = renderTechnical(ctx);
+        break;
+      case 'tools':
+        label = 'Tools';
+        body = renderToolsBlock() || '(no tools available)';
+        break;
+      case 'summaries':
+        label = 'Summaries';
+        body = renderMemoryBlock(chatId, userName) || '(no summaries yet)';
+        break;
+      case 'chat':
+        label = 'Chat';
+        body = renderChatPeek(getWindow(chatId));
+        break;
+    }
+
+    // Telegram caps messages at 4096 chars; keep the <pre> block under that. A single part can
+    // still overflow (persona is large) — clip it and point at /dump for the untruncated dump.
+    const MAX = 3900;
+    const text = `[${label}]\n${body}`;
+    const clipped =
+      text.length > MAX ? `${text.slice(0, MAX)}\n… (truncated — use /dump for the full prompt)` : text;
+    await reply(html`<pre>${clipped}</pre>`);
+  },
+});
+
+register({
+  name: 'dump',
+  description: 'Send the full prompt (system + conversation) as a .md file',
+  handler: async ({ replyDocument, chatId, userName }) => {
     const systemPrompt = renderSystemPrompt({ userName, chatId });
     const conversation = getWindow(chatId);
 
-    // Telegram caps messages at 4096 chars; keep each <pre> block under that. The system
-    // prompt and the conversation are sent as two separate messages so neither truncates
-    // the other (the system prompt alone — persona + tools — can approach the limit).
-    const MAX = 3900;
-    const clip = (s: string) => (s.length > MAX ? `${s.slice(0, MAX)}\n… (truncated)` : s);
-
-    // 1) The full system prompt.
-    await reply(html`<pre>${clip(`[System]\n${systemPrompt}`)}</pre>`);
-
-    // 2) The conversation: first 2 + last 3 messages, eliding the middle of long histories.
-    const HEAD = 2;
-    const TAIL = 3;
-    const parts: ChatMessage[] =
-      conversation.length <= HEAD + TAIL
-        ? conversation
-        : [
-            ...conversation.slice(0, HEAD),
-            { role: 'system', content: `… (${conversation.length - HEAD - TAIL} messages omitted) …` },
-            ...conversation.slice(-TAIL),
-          ];
+    // Verbatim fidelity: each section's raw text goes inside a fenced block so the .md reader
+    // shows exactly what the model receives (the prompt's own `#` headings don't become reader
+    // headings). The fence is sized longer than any backtick run inside, so content that itself
+    // contains ``` can't break out of the block.
+    const fence = (content: string): string => {
+      const longest = Math.max(0, ...[...content.matchAll(/`+/g)].map((m) => m[0].length));
+      const ticks = '`'.repeat(Math.max(3, longest + 1));
+      return `${ticks}\n${content}\n${ticks}`;
+    };
 
     const convText = conversation.length
-      ? parts
-          .map((m) =>
-            m.role === 'system' && m.content.startsWith('…')
-              ? m.content
-              : `[${ROLE_LABELS[m.role]}]\n${m.content}`,
-          )
-          .join('\n\n')
+      ? conversation.map((m) => `[${ROLE_LABELS[m.role]}]\n${m.content}`).join('\n\n')
       : '(no conversation yet)';
 
-    await reply(html`<pre>${clip(convText)}</pre>`);
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}_${pad(now.getMonth() + 1)}_${pad(now.getDate())}_` +
+      `${pad(now.getHours())}${pad(now.getMinutes())}`;
+    const heading = now.toLocaleString('en-US', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+
+    const doc =
+      `# Prompt dump — ${heading}\n\n` +
+      `## System prompt\n\n${fence(systemPrompt)}\n\n` +
+      `## Conversation — ${conversation.length} message${conversation.length === 1 ? '' : 's'}\n\n` +
+      fence(convText) +
+      '\n';
+
+    await replyDocument(
+      Buffer.from(doc, 'utf8'),
+      `prompt_${stamp}.md`,
+      md(`📄 Full prompt — system + ${conversation.length} message${conversation.length === 1 ? '' : 's'}`),
+    );
   },
 });
 

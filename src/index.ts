@@ -1,4 +1,4 @@
-import { TelegramClient, proxyTransportFromUrl, type InputText, type Message } from '@mtcute/node';
+import { InputMedia, TelegramClient, proxyTransportFromUrl, type InputText, type Message } from '@mtcute/node';
 import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
 import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
@@ -96,6 +96,16 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       trackCommandOutput(chatId, sent.id);
       return sent;
     };
+    // Same tracking as `reply`, but for file output (e.g. /dump's prompt .md).
+    const replyDocument = async (
+      content: Buffer,
+      fileName: string,
+      caption?: InputText,
+    ): Promise<Message> => {
+      const sent = await client.sendMedia(msg.chat, InputMedia.document(content, { fileName, caption }));
+      trackCommandOutput(chatId, sent.id);
+      return sent;
+    };
 
     const command = resolveCommand(parsed.name);
     if (!command) {
@@ -111,6 +121,7 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
         startedAt,
         selfName,
         reply,
+        replyDocument,
       };
 
       log.info(`Command /${parsed.name} from ${senderId}`);

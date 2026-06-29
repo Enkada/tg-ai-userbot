@@ -22,12 +22,13 @@ function loadPersona(): string {
 }
 
 /**
- * Raw template loaded once at startup; tags are substituted per message. Persona (user) +
- * technical (app) are joined here; the tools block is appended per-render (it's conditional).
+ * The two static layers, loaded once at startup; `{{tag}}` placeholders are substituted per
+ * message. Persona (user-owned) and technical (app-owned) are kept separate so `/prompt` can
+ * show either one alone — `renderSystemPrompt` rejoins them in the original order.
  */
+const persona = loadPersona();
 const technical = readFileSync(resolve(process.cwd(), config.llm.technicalPromptPath), 'utf8').trim();
-const template = `${loadPersona()}\n\n${technical}`;
-log.info(`Loaded system prompt template (${template.length} chars)`);
+log.info(`Loaded system prompt layers (persona ${persona.length} + technical ${technical.length} chars)`);
 
 export interface PromptContext {
   /** Display name of the Telegram user the bot is talking to (for {{user}}). */
@@ -41,7 +42,7 @@ export interface PromptContext {
  * short framing line that tells the model these are its own recollections (not instructions,
  * and never to be quoted). Returns '' when the chat has no summaries yet, so nothing is added.
  */
-function renderMemoryBlock(chatId: number, userName: string): string {
+export function renderMemoryBlock(chatId: number, userName: string): string {
   const entries = getRecentSummaries(chatId, config.summary.maxKept);
   if (entries.length === 0) return '';
   const body = entries
@@ -86,11 +87,8 @@ export function dayPeriod(hour: number): string {
  * (observed: 6/6 openers fixated on the same memory). Openers still carry the live recent-message
  * window, so short-term continuity is preserved; only multi-day recall is withheld from them.
  */
-export function renderSystemPrompt(
-  ctx: PromptContext,
-  opts: { now?: Date; includeMemory?: boolean } = {},
-): string {
-  const { now = new Date(), includeMemory = true } = opts;
+/** Substitutes `{{tag}}` placeholders in one layer of text; unknown tags are left untouched. */
+function substitute(text: string, ctx: PromptContext, now: Date): string {
   const vars: Record<string, string> = {
     char: config.character.name,
     user: ctx.userName,
@@ -98,16 +96,35 @@ export function renderSystemPrompt(
     day: now.toLocaleDateString('en-US', { weekday: 'long' }),
     period: dayPeriod(now.getHours()),
   };
-
-  const rendered = template.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, name: string) => {
+  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, name: string) => {
     const key = name.toLowerCase();
     return key in vars ? vars[key] : match;
   });
+}
+
+/** The persona layer with tags substituted — the user-owned slice of the system prompt. */
+export function renderPersona(ctx: PromptContext, opts: { now?: Date } = {}): string {
+  return substitute(persona, ctx, opts.now ?? new Date());
+}
+
+/** The technical layer with tags substituted — the app-owned slice of the system prompt. */
+export function renderTechnical(ctx: PromptContext, opts: { now?: Date } = {}): string {
+  return substitute(technical, ctx, opts.now ?? new Date());
+}
+
+export function renderSystemPrompt(
+  ctx: PromptContext,
+  opts: { now?: Date; includeMemory?: boolean } = {},
+): string {
+  const { now = new Date(), includeMemory = true } = opts;
 
   // Persona + technical → memory (recollections) → tools (capabilities/protocol). Both the memory
   // and tools blocks are conditional and rendered per message, so /prompt and /context reflect the
-  // exact prompt the LLM sees.
+  // exact prompt the LLM sees. The order here is the single source of truth for the live payload,
+  // /prompt, and /dump alike — keep it in sync with renderToolsBlock's placement.
   const memory = includeMemory ? renderMemoryBlock(ctx.chatId, ctx.userName) : '';
   const tools = renderToolsBlock();
-  return [rendered, memory, tools].filter(Boolean).join('\n\n');
+  return [renderPersona(ctx, { now }), renderTechnical(ctx, { now }), memory, tools]
+    .filter(Boolean)
+    .join('\n\n');
 }
