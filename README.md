@@ -17,10 +17,11 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
 - Renders **Markdown** in replies (bold, code, links…).
 - Shows a live **"typing…"** status while the model generates (refreshed every ~5s).
 - Marks incoming messages as **read** on arrival.
-- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/reset`, `/clear`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`).
+- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/dump`.
 - **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
-  and the bot's command output is deleted as soon as you send your next normal message —
-  so slash-command chatter never piles up next to the conversation.
+  and command output lives in a single reusable **panel** message that each command edits
+  in place — swept away as soon as you send your next normal message. The bookkeeping is
+  persisted in SQLite, so a restart can't orphan stray output.
 - **DMs only**: groups, supergroups and channels are ignored.
 - **Whitelist**: only configured Telegram user IDs are served; everyone else is ignored.
 - Ignores its own outgoing messages (no feedback loops).
@@ -32,9 +33,8 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
 | `/help`           | List available commands                                               |
 | `/status` (`/s`)  | Bot uptime/account + both LLM providers (state, model, vision, which is active) |
 | `/openrouter` (`/or`) | OpenRouter config, model context/vision, and free-tier usage/limits (`/key`) |
-| `/reset`          | Clear conversation memory (soft-delete — rows are flagged, not erased) |
-| `/clear`          | Erase the whole Telegram chat for both sides (revoke) **and** clear memory |
-| `/delete` (`/d`)  | Delete the last N messages for both sides — `/d` = 1, `/d N` = N; soft-flags memory like `/reset` |
+| `/nuke`           | Erase the whole Telegram chat for both sides (revoke) **and** wipe memory + summaries; asks for `/nuke confirm` above 20 stored messages |
+| `/delete` (`/d`)  | Delete the last N messages for both sides — `/d` = 1, `/d N` = N; soft-flags memory like `/nuke` |
 | `/reroll` (`/r`)  | Regenerate the last reply (re-runs the model without it) and edits the message in place |
 | `/update` (`/u`)  | Replace the last reply with your own text — `/u <new text>`; edits the message in place |
 | `/context` (`/c`) | Token usage (system prompt + window) vs. the model's max context, plus window re-anchoring state |
@@ -45,9 +45,14 @@ last reply **in place** — they overwrite that one record instead of appending,
 the Telegram message stay in sync without piling up edits.
 
 Commands keep the chat tidy: the `/command` message itself is deleted (for both sides)
-as soon as it's handled, and the bot's reply is deleted the moment you send your next
-normal (non-command) message. So checking `/context`, then replying, leaves no trace of
-either the command or its output.
+as soon as it's handled, and output is rendered into one reusable **panel** message per
+chat — a follow-up command edits the panel in place instead of adding another bubble, and
+your next normal (non-command) message sweeps it away entirely. So checking `/context`,
+then replying, leaves no trace of either the command or its output. `/dump`'s file (which
+can't be an edit) and error notices are tracked the same way and swept with the panel.
+The tracked message ids live in SQLite (`command_debris`), so output stranded by a
+restart or crash is collected on the next interaction. `/reroll` and `/update` remove the
+panel instead of writing to it — their real output is the replaced reply itself.
 
 ### Memory & the context window
 
@@ -56,7 +61,7 @@ shift the prompt prefix on every message and force llama.cpp to re-evaluate the 
 conversation each time), the window is **anchored and grows from 60 up to 79 messages,
 then snaps back to 60** every 20th message. Between snaps the older messages are
 byte-identical, so the llama.cpp KV cache is reused — roughly 19 cheap turns per 1 full
-recompute. `/reset` and `/delete` soft-delete via a `deleted` flag (nothing is physically
+recompute. `/nuke` and `/delete` soft-delete via a `deleted` flag (nothing is physically
 removed).
 
 Before the window is sent to the model, **consecutive messages from the same role are
@@ -109,7 +114,7 @@ independent of the active chat provider, so it has full context regardless of th
 - **State** (`summary_state`) lives in the DB, so the schedule survives restarts and catches up on
   any day missed during downtime. Existing history from before the feature is switched on is **not**
   back-filled — the day you enable it becomes the first entry.
-- `/reset` and `/clear` soft-delete a chat's summaries along with its messages.
+- `/nuke` soft-deletes a chat's summaries along with its messages.
 - **Reactive replies only**: the `# Memory` block is withheld from proactive openers. With no
   user message to anchor on, an opener otherwise fixates on the single most salient summary and
   rehashes it every reach-out; openers still carry the live recent-message window for short-term
@@ -179,6 +184,7 @@ src/
   index.ts      Entry point: client setup, message handling, login, shutdown
   config.ts     Env loading, validation, whitelist, LLM + DB settings
   commands.ts   Command registry + parser (/help, /status, /openrouter, /reroll, …)
+  panel.ts      Command-output panel (edit-in-place message) + debris tracking/sweep
   llm.ts        Provider facade: picks a backend at startup, re-exports the chat API
   providers/
     types.ts    Shared message helpers + provider interface + OpenAI-compatible call
@@ -210,13 +216,15 @@ Register it in `src/commands.ts`:
 register({
   name: 'ping',
   description: 'Reply with pong',
-  handler: async ({ client, msg }) => {
-    await client.replyText(msg, 'pong');
+  handler: async ({ reply }) => {
+    await reply('pong');
   },
 });
 ```
 
-It is automatically picked up by `/help` and the router.
+It is automatically picked up by `/help` and the router. Use `ctx.reply` for output —
+it renders into the self-cleaning panel; a raw `client.sendText` would leave a message
+nothing ever sweeps up.
 
 ## Notes
 

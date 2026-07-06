@@ -350,7 +350,7 @@ export interface DeleteResult {
 
 /**
  * Soft-deletes the last `n` (non-deleted) messages of a chat — same `deleted` flag as
- * /reset, nothing is physically removed. Returns the count flagged and the Telegram ids
+ * /nuke, nothing is physically removed. Returns the count flagged and the Telegram ids
  * to revoke in the chat — every bubble of each row, since a streamed reply spans several
  * (rows without stored ids, if any, are flagged but not revokable).
  */
@@ -533,10 +533,20 @@ export function rememberUserName(chatId: number, userName: string): void {
     .run();
 }
 
+/** Count of non-deleted summaries for a chat (all levels). Feeds /nuke's confirmation. */
+export function summaryCount(chatId: number): number {
+  const row = db
+    .select({ c: count() })
+    .from(summaries)
+    .where(and(eq(summaries.chatId, chatId), eq(summaries.deleted, false)))
+    .get();
+  return row?.c ?? 0;
+}
+
 /**
  * Soft-deletes all messages for a chat (sets `deleted`), and the chat's summaries with them —
- * a reset wipes recalled long-term memory too, not just the live window. Returns how many
- * message rows were flagged (the figure /reset reports).
+ * /nuke wipes recalled long-term memory too, not just the live window. Returns how many
+ * message rows were flagged.
  */
 export function resetMemory(chatId: number): number {
   const res = db

@@ -22,11 +22,15 @@ import {
   getLastRole,
   getWindow,
   getWindowInfo,
+  messageCount,
   resetMemory,
+  summaryCount,
   updateMessageContent,
+  upsertProactiveState,
   MIN_WINDOW,
   STEP,
 } from './memory.js';
+import { forgetDebris } from './panel.js';
 import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
@@ -58,16 +62,24 @@ export interface CommandContext {
   /** Display name of the logged-in account. */
   selfName: string;
   /**
-   * Sends a message as command output. Tracked so it can be auto-deleted (for both
-   * sides) once the user sends their next normal message. Use this instead of
-   * `client.answerText` in command handlers.
+   * Renders command output into the chat's panel — a single reusable bot message that is
+   * edited in place (created if absent), so consecutive commands never stack output. The
+   * panel is swept away when the user sends their next normal message. Use this instead
+   * of `client.answerText` in command handlers.
    */
-  reply: (content: InputText) => Promise<Message>;
+  reply: (content: InputText) => Promise<void>;
   /**
-   * Sends a file as command output (tracked for auto-deletion like {@link reply}). Used by
-   * `/dump` to deliver the full prompt as a `.md` document instead of an in-chat message.
+   * Sends a file as command output. Files can't live in the panel (a text message can't
+   * become a document), so this sends a separate message, tracked as debris: it's swept
+   * on the next normal message or the next command. Used by `/dump`.
    */
-  replyDocument: (content: Buffer, fileName: string, caption?: InputText) => Promise<Message>;
+  replyDocument: (content: Buffer, fileName: string, caption?: InputText) => Promise<void>;
+  /**
+   * Revokes the chat's panel message (no-op if none). For commands whose success output
+   * is the conversation itself (`/reroll`, `/update`): leftover panel content — say a
+   * `/prompt` dump — vanishes at the moment the new reply lands.
+   */
+  dropPanel: () => Promise<void>;
 }
 
 export interface Command {
@@ -235,15 +247,6 @@ Free-tier key: **${freeTier}**`),
 });
 
 register({
-  name: 'reset',
-  description: 'Clear conversation memory',
-  handler: async ({ reply, chatId }) => {
-    const cleared = resetMemory(chatId);
-    await reply(md`🗑️ Memory cleared (**${cleared}** messages removed).`);
-  },
-});
-
-register({
   name: 'delete',
   aliases: ['d'],
   description: 'Delete the last N messages for both sides (default 1): /d [N]',
@@ -254,7 +257,7 @@ register({
       return;
     }
 
-    // Soft-flag the rows (like /reset), then revoke those messages in the chat.
+    // Soft-flag the rows (like /nuke), then revoke those messages in the chat.
     const { flagged, tgMessageIds } = deleteLastMessages(chatId, n);
     if (flagged === 0) {
       await reply('Nothing to delete.');
@@ -267,21 +270,37 @@ register({
   },
 });
 
+/** Non-deleted message count above which /nuke demands an explicit `confirm` argument. */
+const NUKE_CONFIRM_THRESHOLD = 20;
+
 register({
-  name: 'clear',
-  description: 'Erase the whole Telegram chat for both sides + clear memory',
-  handler: async ({ client, msg, reply, chatId }) => {
-    // Same as /reset: soft-delete the conversation memory.
-    resetMemory(chatId);
-    // Then wipe the Telegram chat history for both participants. `revoke` deletes
-    // for everyone; maxId 0 (default) removes all messages — including this command,
-    // so no confirmation is sent (the now-empty chat is the result).
-    try {
-      await client.deleteHistory(msg.chat, { mode: 'revoke' });
-    } catch (err) {
-      await reply('⚠️ Memory cleared, but could not erase the Telegram chat history.');
-      throw err;
+  name: 'nuke',
+  description: 'Erase the chat for both sides + wipe all memory: /nuke [confirm]',
+  handler: async ({ client, msg, reply, chatId, args }) => {
+    // Guard the irreversible path: past the threshold, show what would die and require
+    // an explicit `/nuke confirm`. The prompt lives in the panel, so ignoring it makes
+    // it sweep away like any other command output. Tiny (test) chats skip the ceremony.
+    const total = messageCount(chatId);
+    if (total > NUKE_CONFIRM_THRESHOLD && args[0]?.toLowerCase() !== 'confirm') {
+      const nSummaries = summaryCount(chatId);
+      await reply(
+        md(`☢️ **Nuke** — erases this chat for both sides and wipes memory: **${total}** message${total === 1 ? '' : 's'}, **${nSummaries}** summar${nSummaries === 1 ? 'y' : 'ies'}. Cannot be undone.
+Send \`/nuke confirm\` to proceed.`),
+      );
+      return;
     }
+
+    // Telegram first: if the history wipe fails, memory is untouched and nothing is
+    // lost — just retry. `revoke` deletes for both participants; maxId 0 (default)
+    // removes everything, including this command and the panel, so no confirmation
+    // message is sent (the now-empty chat is the result).
+    await client.deleteHistory(msg.chat, { mode: 'revoke' });
+    // Soft-delete the conversation memory and the chat's long-term summaries.
+    resetMemory(chatId);
+    // A fresh start shouldn't inherit proactive escalation from the previous life.
+    upsertProactiveState(chatId, { dueAt: null, isMorning: false, ignoredCount: 0 });
+    // The tracked panel/file/command messages died with the history — drop their rows.
+    forgetDebris(chatId);
   },
 });
 
@@ -289,7 +308,7 @@ register({
   name: 'reroll',
   aliases: ['r'],
   description: 'Regenerate the last reply, editing it in place',
-  handler: async ({ client, msg, reply, chatId, userName }) => {
+  handler: async ({ client, msg, reply, dropPanel, chatId, userName }) => {
     const last = getLastAssistant(chatId);
     if (!last) {
       await reply('Nothing to reroll — no previous reply.');
@@ -321,6 +340,9 @@ register({
     const streamer = new ReplyStreamer(client, msg.chat, async () => {
       await client.deleteMessagesById(msg.chat, oldIds, { revoke: true }).catch(() => {});
       await client.deleteMessages([msg], { revoke: true }).catch(() => {});
+      // /r's output is the regenerated reply itself, not the panel — any open panel
+      // content (a /prompt dump, a /status readout) goes with the old reply.
+      await dropPanel();
     });
     let regenerated: ChatResult;
     try {
@@ -362,7 +384,7 @@ register({
   name: 'update',
   aliases: ['u'],
   description: 'Replace the last reply with your own text: /u <new text>',
-  handler: async ({ client, msg, reply, chatId, rawArgs }) => {
+  handler: async ({ client, msg, reply, dropPanel, chatId, rawArgs }) => {
     const text = rawArgs.trim();
     if (!text) {
       await reply(md('Usage: `/u <text>` — replaces the last reply with your own text.'));
@@ -391,6 +413,8 @@ register({
     }
     await client.deleteMessagesById(msg.chat, last.tgMessageIds, { revoke: true }).catch(() => {});
     updateMessageContent(last.id, text, null, [sent.id]);
+    // Like /r: the replacement text is the output — clear any open panel with the swap.
+    await dropPanel();
   },
 });
 

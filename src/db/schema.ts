@@ -3,7 +3,8 @@ import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 /**
  * Conversation memory. Every user message and AI reply is stored as one row.
- * Deletion is soft (the `deleted` flag) — `/reset` flags rows instead of removing them.
+ * Deletion is soft (the `deleted` flag) — `/nuke` and `/delete` flag rows instead of
+ * removing them.
  */
 export const messages = sqliteTable(
   'messages',
@@ -39,7 +40,7 @@ export const messages = sqliteTable(
      * Drives the "one outstanding proactive message" guard.
      */
     proactive: integer('proactive', { mode: 'boolean' }).notNull().default(false),
-    /** Soft-delete flag. Set by /reset; excluded from the context window. */
+    /** Soft-delete flag. Set by /nuke and /delete; excluded from the context window. */
     deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
     /** Epoch milliseconds. */
     createdAt: integer('created_at')
@@ -158,8 +159,8 @@ export type ProactiveStateRow = typeof proactiveState.$inferSelect;
  *
  * `periodStart`/`periodEnd` are the logical day's epoch-ms bounds (`[start, end)`), used both
  * as the dedup key (one row per chat+level+periodStart) and to date-stamp the entry at render.
- * Soft-deleted like {@link messages} — `/reset` and `/clear` flag instead of removing, so a
- * reset wipes recalled memory too.
+ * Soft-deleted like {@link messages} — `/nuke` flags instead of removing, so a nuke wipes
+ * recalled memory too.
  */
 export const summaries = sqliteTable(
   'summaries',
@@ -175,7 +176,7 @@ export const summaries = sqliteTable(
     periodEnd: integer('period_end').notNull(),
     /** The summarizer's output (Headline/Happened/Mood/Follow-ups, in {@link char}'s first-person voice). */
     content: text('content').notNull(),
-    /** Soft-delete flag. Set by /reset and /clear; excluded from the injected memory block. */
+    /** Soft-delete flag. Set by /nuke; excluded from the injected memory block. */
     deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
     /** Epoch milliseconds. */
     createdAt: integer('created_at')
@@ -214,3 +215,36 @@ export const summaryState = sqliteTable('summary_state', {
 });
 
 export type SummaryStateRow = typeof summaryState.$inferSelect;
+
+/**
+ * Ephemeral slash-command debris living in the Telegram chat: messages the bot must
+ * eventually revoke so command chatter never sits next to the conversation. Kept in the
+ * DB (not process memory) so a restart can't orphan them — the sweep reads from here.
+ *
+ * `kind` says what the message is:
+ * - `panel` — the single reusable output message per chat that command results edit in
+ *   place (at most one row per chat);
+ * - `file` — a document output (`/dump`), which can't be an edit;
+ * - `command` — the user's own `/command` message, tracked from dispatch until its
+ *   post-handler delete succeeds, so a crash mid-handler leaves it collectable.
+ *
+ * Rows are removed once the underlying message is revoked (or found already gone).
+ */
+export const commandDebris = sqliteTable(
+  'command_debris',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Telegram chat (peer) id — same key as {@link messages.chatId}. */
+    chatId: integer('chat_id').notNull(),
+    /** Telegram message id to revoke. */
+    tgMessageId: integer('tg_message_id').notNull(),
+    kind: text('kind', { enum: ['panel', 'file', 'command'] }).notNull(),
+    /** Epoch milliseconds. */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_debris_chat').on(t.chatId)],
+);
+
+export type CommandDebrisRow = typeof commandDebris.$inferSelect;

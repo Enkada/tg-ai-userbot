@@ -2,6 +2,7 @@ import { InputMedia, TelegramClient, proxyTransportFromUrl, type InputText, type
 import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
 import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
+import { dropPanel, showPanel, sweepDebris, trackDebris, untrackDebris } from './panel.js';
 import { activeProviderId, describeImage, getVisionSupport, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
@@ -16,19 +17,6 @@ import { startSummaryLoop } from './summary.js';
 
 const log = createLogger('bot');
 const startedAt = Date.now();
-
-/**
- * Per-chat ids of bot messages sent as slash-command output. They're deleted (for both
- * sides) the moment the user sends their next normal message, so command output doesn't
- * pile up alongside the actual conversation.
- */
-const pendingCommandOutputs = new Map<number, number[]>();
-
-function trackCommandOutput(chatId: number, messageId: number): void {
-  const ids = pendingCommandOutputs.get(chatId);
-  if (ids) ids.push(messageId);
-  else pendingCommandOutputs.set(chatId, [messageId]);
-}
 
 const client = new TelegramClient({
   apiId: config.apiId,
@@ -89,48 +77,65 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   const parsed = photo ? null : parseCommand(text);
 
   if (parsed) {
-    // All command output goes through `reply` so each sent message is tracked and
-    // can be swept away when the user's next normal message arrives.
-    const reply = async (content: InputText): Promise<Message> => {
-      const sent = await client.answerText(msg, content);
-      trackCommandOutput(chatId, sent.id);
-      return sent;
-    };
-    // Same tracking as `reply`, but for file output (e.g. /dump's prompt .md).
+    // Leftover /dump files and command messages stranded by a crash go first, so file
+    // output never stacks. The panel itself stays — the handler edits it in place.
+    await sweepDebris(client, msg.chat, chatId, ['file', 'command']);
+    // Track this command message from the start: if the process dies mid-handler, the
+    // post-handler delete below never runs and the next sweep collects it instead.
+    trackDebris(chatId, msg.id, 'command');
+
+    // All command output goes through the panel: one reusable message per chat, edited
+    // in place, swept away when the user's next normal message arrives.
+    const reply = (content: InputText): Promise<void> => showPanel(client, msg.chat, chatId, content);
+    // File output (e.g. /dump's prompt .md) can't be a panel edit — send + track it.
     const replyDocument = async (
       content: Buffer,
       fileName: string,
       caption?: InputText,
-    ): Promise<Message> => {
+    ): Promise<void> => {
       const sent = await client.sendMedia(msg.chat, InputMedia.document(content, { fileName, caption }));
-      trackCommandOutput(chatId, sent.id);
-      return sent;
+      trackDebris(chatId, sent.id, 'file');
     };
 
     const command = resolveCommand(parsed.name);
-    if (!command) {
-      await reply(`Unknown command: /${parsed.name}. Try /help`);
-    } else {
-      const ctx: CommandContext = {
-        client,
-        msg,
-        chatId,
-        userName,
-        args: parsed.args,
-        rawArgs: parsed.rawArgs,
-        startedAt,
-        selfName,
-        reply,
-        replyDocument,
-      };
+    try {
+      if (!command) {
+        await reply(`Unknown command: /${parsed.name}. Try /help`);
+      } else {
+        const ctx: CommandContext = {
+          client,
+          msg,
+          chatId,
+          userName,
+          args: parsed.args,
+          rawArgs: parsed.rawArgs,
+          startedAt,
+          selfName,
+          reply,
+          replyDocument,
+          dropPanel: () => dropPanel(client, msg.chat, chatId),
+        };
 
-      log.info(`Command /${parsed.name} from ${senderId}`);
-      await command.handler(ctx);
+        log.info(`Command /${parsed.name} from ${senderId}`);
+        await command.handler(ctx);
+      }
+    } catch (err) {
+      // A failed command must never end in silence: surface it in the panel (tracked,
+      // so it sweeps like any output) instead of leaving the chat looking ignored.
+      log.error(`Command /${parsed.name} failed:`, err);
+      await reply('⚠️ Command failed — check the server logs.').catch(() => {});
     }
 
     // Delete the user's command message (for both sides) so it doesn't clutter the
-    // chat. It may already be gone — e.g. /clear wipes the history — so ignore errors.
-    await client.deleteMessages([msg], { revoke: true }).catch(() => {});
+    // chat. It may already be gone — /nuke wipes the history, /r revokes it at the
+    // swap — Telegram treats that as success. Only release the debris row once the
+    // revoke went through; on failure the row stays and the next sweep retries.
+    try {
+      await client.deleteMessages([msg], { revoke: true });
+      untrackDebris(chatId, msg.id);
+    } catch {
+      /* keep the debris row for the next sweep */
+    }
     return;
   }
 
@@ -144,13 +149,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
     if (!text) return;
   }
 
-  // A normal message arrived: sweep away any leftover slash-command output first, so
-  // stale /context, /status, etc. responses don't accumulate next to the conversation.
-  const staleOutputs = pendingCommandOutputs.get(chatId);
-  if (staleOutputs?.length) {
-    pendingCommandOutputs.delete(chatId);
-    await client.deleteMessagesById(msg.chat, staleOutputs, { revoke: true }).catch(() => {});
-  }
+  // A normal message arrived: sweep away all slash-command debris — the panel, /dump
+  // files, stranded command messages — so it doesn't sit next to the conversation.
+  // The sweep reads from the DB, so debris orphaned by a restart is collected here too.
+  await sweepDebris(client, msg.chat, chatId);
 
   // Any non-command text (and/or a photo) from whitelisted users goes to the local LLM.
   log.info(`LLM request from ${senderId}: ${imagePhoto ? '[photo] ' : ''}${text.slice(0, 80)}`);
@@ -207,7 +209,9 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       });
     } else {
       log.error('LLM error:', err);
-      await client.answerText(msg, '⚠️ Sorry, I could not get a response from the language model.');
+      // The apology is ephemeral, not conversation: route it through the panel so a
+      // retry that fails again edits the same notice, and any reply sweeps it away.
+      await showPanel(client, msg.chat, chatId, '⚠️ Sorry, I could not get a response from the language model.');
     }
   }
 }
