@@ -6,6 +6,7 @@ import { dropPanel, showPanel, sweepDebris, trackDebris, untrackDebris } from '.
 import { activeProviderId, describeImage, getVisionSupport, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
+import { initPersona } from './persona.js';
 import { rememberUserName, saveAttachment, saveMessage } from './memory.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
 import { finalizeReply } from './tools.js';
@@ -220,6 +221,8 @@ async function main(): Promise<void> {
   log.info('Starting UserBot...');
 
   runMigrations();
+  // The persona lives in the DB (persona_versions) — load it only after migrations.
+  initPersona();
 
   if (config.proxyUrl) {
     // Log the proxy host without leaking any user:pass credentials in the URL.

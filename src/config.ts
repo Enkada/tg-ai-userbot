@@ -95,9 +95,13 @@ export const config = {
   },
   llm: {
     // ---- System prompt, assembled from three layers (persona + technical + tools) ----
-    /** User-owned persona layer — the only user-editable prompt. Created from the default on first run. */
+    /**
+     * Legacy persona file, now only a migration seed: the persona lives in the DB
+     * (persona_versions, edited via /persona) and this file is read once to seed the table
+     * when it's empty — so a pre-DB install keeps its tweaked persona. Never written.
+     */
     personaPromptPath: process.env.PERSONA_PROMPT_PATH ?? 'prompts/persona.txt',
-    /** Shipped default persona: copied to personaPromptPath on first run, and the source for "reset to default". */
+    /** Shipped default persona: the first-run seed (when no legacy file exists) and the source for /persona default. */
     personaDefaultPath: 'prompts/persona.default.txt',
     /** App-owned technical layer (current app limits + dynamic context). Evolves with features; never user-copied. */
     technicalPromptPath: 'prompts/technical.txt',

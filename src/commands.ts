@@ -31,6 +31,7 @@ import {
   STEP,
 } from './memory.js';
 import { forgetDebris } from './panel.js';
+import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
 import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
@@ -510,7 +511,7 @@ const PROMPT_HELP = md(`**🧩 /prompt** \`<part>\` — show one slice of the pr
 \`c\` — chat window (first 3 + last 6)
 \`h\` — this help
 
-Use \`/dump\` for the full prompt as a \`.md\` file.`);
+Use \`/dump\` for the full prompt as a \`.md\` file, \`/persona\` to edit the persona layer.`);
 
 /**
  * Renders the chat window the way the LLM-facing window is shaped, but elided for a quick peek:
@@ -588,6 +589,72 @@ register({
     const clipped =
       text.length > MAX ? `${text.slice(0, MAX)}\n… (truncated — use /dump for the full prompt)` : text;
     await reply(html`<pre>${clipped}</pre>`);
+  },
+});
+
+/** The `/persona` help: the action menu, plus how it relates to `/prompt`. */
+const PERSONA_HELP = md(`**👤 /persona** — view or edit the persona layer of the system prompt
+\`/persona\` — show the current persona (raw, \`{{tags}}\` intact — copy from here to edit)
+\`/persona set <text>\` — replace the persona (applies instantly, all chats)
+\`/persona undo\` — swap with the previous version (run again to redo — handy for A/B)
+\`/persona default\` — reset to the shipped default
+
+\`/prompt p\` shows the same layer as the model sees it (tags substituted).`);
+
+register({
+  name: 'persona',
+  description: 'View or edit the persona: /persona [set <text>|undo|default]',
+  handler: async ({ reply, args, rawArgs }) => {
+    // Shows the raw persona under an optional status line. The <pre> holds only the persona
+    // text (no label) so tap-to-copy on mobile grabs exactly what you'd edit and resend.
+    const show = async (status?: string) => {
+      const MAX = 3900; // Telegram's 4096 cap, minus room for the status line.
+      const body = getPersona();
+      const clipped = body.length > MAX ? `${body.slice(0, MAX)}\n… (truncated)` : body;
+      await reply(status ? html`${status}<br><pre>${clipped}</pre>` : html`<pre>${clipped}</pre>`);
+    };
+
+    const action = args[0]?.toLowerCase();
+    switch (action) {
+      case undefined:
+        await show();
+        return;
+      case 'set': {
+        // Everything after the `set` token, newlines included (rawArgs starts with it).
+        const text = rawArgs.slice(3).trim();
+        if (!text) {
+          await reply(PERSONA_HELP);
+          return;
+        }
+        const prev = setPersona(text);
+        if (prev === null) {
+          await show('Persona unchanged — the new text is identical.');
+          return;
+        }
+        await show(`✅ Persona updated (${prev.length} → ${text.length} chars) — /persona undo to revert`);
+        return;
+      }
+      case 'undo': {
+        const prev = undoPersona();
+        if (prev === null) {
+          await show('Nothing to undo — no earlier version.');
+          return;
+        }
+        await show(`↩️ Persona reverted (${prev.length} → ${getPersona().length} chars) — /persona undo again to redo`);
+        return;
+      }
+      case 'default': {
+        const prev = resetPersona();
+        if (prev === null) {
+          await show('Persona is already the default.');
+          return;
+        }
+        await show(`✅ Persona reset to default (${prev.length} → ${getPersona().length} chars) — /persona undo to revert`);
+        return;
+      }
+      default:
+        await reply(PERSONA_HELP);
+    }
   },
 });
 

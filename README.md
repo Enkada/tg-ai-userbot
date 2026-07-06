@@ -17,7 +17,7 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
 - Renders **Markdown** in replies (bold, code, links…).
 - Shows a live **"typing…"** status while the model generates (refreshed every ~5s).
 - Marks incoming messages as **read** on arrival.
-- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/dump`.
+- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/persona`, `/dump`.
 - **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
   and command output lives in a single reusable **panel** message that each command edits
   in place — swept away as soon as you send your next normal message. The bookkeeping is
@@ -39,6 +39,7 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
 | `/update` (`/u`)  | Replace the last reply with your own text — `/u <new text>`; edits the message in place |
 | `/context` (`/c`) | Token usage (system prompt + window) vs. the model's max context, plus window re-anchoring state |
 | `/prompt` (`/p`)  | Show the prompt the LLM receives — system prompt + the first 3 and last 3 messages — as a code block |
+| `/persona`        | View or edit the persona layer from chat, no restart: `/persona` shows the raw text (`{{tags}}` intact, ready to copy), `set <text>` replaces it, `undo` swaps with the previous version (run twice to redo — handy for A/B), `default` resets to the shipped default |
 
 Single-letter shorthands: `/s`, `/d`, `/r`, `/u`, `/c`, `/p`. `/reroll` and `/update` rewrite the
 last reply **in place** — they overwrite that one record instead of appending, so memory and
@@ -74,14 +75,18 @@ The system prompt is assembled from these layers, in order:
 
 | Layer | File | Owner | Notes |
 | ----- | ---- | ----- | ----- |
-| Persona | `prompts/persona.txt` | **user** (git-ignored) | Who the character is + chat style. Created from `persona.default.txt` on first run, then yours to edit. Never overwritten by app updates. |
+| Persona | DB (`persona_versions`) | **user** | Who the character is + chat style. Edited from chat via `/persona` (applies instantly, no restart). Never overwritten by app updates. |
 | Technical | `prompts/technical.txt` | app | Current literal app limits (no audio/video/files yet) + dynamic context. Evolves as features land. |
 | Memory | _(generated)_ | app | The newest daily summaries for this chat as a `# Memory` block (see below). Per-chat and dynamic; omitted when there are none. |
 | Tools | `prompts/tools.txt` | app | The tool-call protocol scaffold; its `{{tools}}` tag is filled with the available tools, and the whole layer is omitted when no tool is configured. |
 
-`persona.default.txt` is the shipped, neutral starting persona (and the source for a future
-"reset to default"). To reset, delete your `prompts/persona.txt` and restart — it's
-recreated from the default.
+The persona lives in the DB as an **append-only version log** — the newest row is the
+active persona, every `/persona set|undo|default` appends a row, so the full edit history
+is inspectable in SQLite and one-step undo (which is itself undoable) survives restarts.
+On first start with an empty table it's seeded from the legacy `prompts/persona.txt` if
+one exists (a pre-DB install keeps its tweaked persona; the file is only read, never
+written), otherwise from `persona.default.txt` — the shipped, neutral starting persona
+and the source for `/persona default`.
 
 All layers support `{{tag}}` placeholders that are substituted per message:
 
@@ -191,6 +196,7 @@ src/
     llamacpp.ts Local llama.cpp backend (chat, vision, exact token count, max ctx)
     openrouter.ts OpenRouter backend (chat, vision, /key usage, estimated tokens)
   prompt.ts     System prompt assembly (persona + technical) + {{tag}} templating
+  persona.ts    Persona layer state: DB-backed version log, /persona set/undo/default
   tools.ts      Tool registry + pseudo tool-call protocol (renders prompts/tools.txt)
   format.ts     Model-output → Telegram Markdown rendering
   typing.ts     "typing…" status helper
@@ -200,8 +206,8 @@ src/
     index.ts    SQLite connection + migrations
   logger.ts     Timestamped logger
 prompts/
-  persona.default.txt  Shipped default persona (tracked)
-  persona.txt          User-owned persona (git-ignored; copied from default on first run)
+  persona.default.txt  Shipped default persona (tracked; source for /persona default)
+  persona.txt          Legacy persona file (git-ignored; only read once to seed the DB)
   technical.txt        App-owned technical layer (limits + dynamic context)
   tools.txt            App-owned tool-protocol scaffold (has {{tools}})
 drizzle/        Generated SQL migrations (committed)

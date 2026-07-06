@@ -5,5 +5,5 @@ data/
 *.session-journal
 .env
 *.log
-# User-owned persona (created from prompts/persona.default.txt on first run)
+# Legacy persona file (now only a one-time DB seed; the live persona is in the DB)
 prompts/persona.txt

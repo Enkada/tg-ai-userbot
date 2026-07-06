@@ -248,3 +248,29 @@ export const commandDebris = sqliteTable(
 );
 
 export type CommandDebrisRow = typeof commandDebris.$inferSelect;
+
+/**
+ * The persona layer of the system prompt, versioned. Append-only: every change is a new
+ * row and **the newest row is the active persona** — no flags to keep consistent, undo
+ * works across restarts, and the table doubles as a change journal when inspected manually.
+ * Global (not per-chat), like the persona file it replaced.
+ *
+ * `source` records how a version came to be:
+ * - `migrated` — seeded from `prompts/persona.txt` (or the default) when the table was empty;
+ * - `set`      — written by `/persona set`;
+ * - `undo`     — a copy of the second-newest version, appended by `/persona undo` (so undo
+ *                is itself undoable — two undos toggle between the last two versions);
+ * - `default`  — a copy of `prompts/persona.default.txt`, appended by `/persona default`.
+ */
+export const personaVersions = sqliteTable('persona_versions', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  /** Raw persona text, `{{tag}}` placeholders intact. */
+  content: text('content').notNull(),
+  source: text('source', { enum: ['migrated', 'set', 'undo', 'default'] }).notNull(),
+  /** Epoch milliseconds. */
+  createdAt: integer('created_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type PersonaVersionRow = typeof personaVersions.$inferSelect;

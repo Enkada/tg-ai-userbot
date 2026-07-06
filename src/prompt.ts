@@ -1,34 +1,22 @@
-import { readFileSync, existsSync, copyFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { getRecentSummaries } from './memory.js';
+import { getPersona } from './persona.js';
 import { renderToolsBlock } from './tools.js';
 
 const log = createLogger('prompt');
 
 /**
- * Loads the user-owned persona layer, creating it from the shipped default on first run.
- * The persona is the only user-editable layer (so it never receives later app changes —
- * by design); the technical and tools layers stay app-owned and evolve with features.
+ * The app-owned technical layer, loaded once at startup; `{{tag}}` placeholders are
+ * substituted per message. The persona layer (user-owned, editable via `/persona`) lives in
+ * the DB and is read through {@link getPersona} per render, so edits apply instantly. The
+ * two are kept separate so `/prompt` can show either one alone — `renderSystemPrompt`
+ * rejoins them in the original order.
  */
-function loadPersona(): string {
-  const userPath = resolve(process.cwd(), config.llm.personaPromptPath);
-  if (!existsSync(userPath)) {
-    copyFileSync(resolve(process.cwd(), config.llm.personaDefaultPath), userPath);
-    log.info(`No persona file at ${config.llm.personaPromptPath}; created it from the default`);
-  }
-  return readFileSync(userPath, 'utf8').trim();
-}
-
-/**
- * The two static layers, loaded once at startup; `{{tag}}` placeholders are substituted per
- * message. Persona (user-owned) and technical (app-owned) are kept separate so `/prompt` can
- * show either one alone — `renderSystemPrompt` rejoins them in the original order.
- */
-const persona = loadPersona();
 const technical = readFileSync(resolve(process.cwd(), config.llm.technicalPromptPath), 'utf8').trim();
-log.info(`Loaded system prompt layers (persona ${persona.length} + technical ${technical.length} chars)`);
+log.info(`Loaded technical prompt layer (${technical.length} chars)`);
 
 export interface PromptContext {
   /** Display name of the Telegram user the bot is talking to (for {{user}}). */
@@ -104,7 +92,7 @@ function substitute(text: string, ctx: PromptContext, now: Date): string {
 
 /** The persona layer with tags substituted — the user-owned slice of the system prompt. */
 export function renderPersona(ctx: PromptContext, opts: { now?: Date } = {}): string {
-  return substitute(persona, ctx, opts.now ?? new Date());
+  return substitute(getPersona(), ctx, opts.now ?? new Date());
 }
 
 /** The technical layer with tags substituted — the app-owned slice of the system prompt. */
