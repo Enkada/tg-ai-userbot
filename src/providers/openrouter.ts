@@ -6,7 +6,9 @@
  * for token counting (OpenRouter has no tokenize endpoint).
  */
 import { encode } from 'gpt-tokenizer';
+import { fetch as undiciFetch } from 'undici';
 import { config } from '../config.js';
+import { getOpenRouterDispatcher } from './proxyAgent.js';
 import {
   type LlmProvider,
   type ProviderStatus,
@@ -18,6 +20,8 @@ import {
 const cfg = config.llm.openrouter;
 const gen = config.llm;
 const CHAT_URL = `${cfg.baseUrl}/chat/completions`;
+/** Same VDS IP that gets Telegram's DCs blocked also trips OpenRouter's WAF; route around it. */
+const dispatcher = getOpenRouterDispatcher();
 
 /**
  * Upstream provider routing (the `provider` request field). `order` lists preferred
@@ -96,10 +100,10 @@ async function fetchKeyInfo(): Promise<KeyInfo | null> {
   if (!cfg.apiKey) return null;
   if (keyCache && Date.now() - keyCache.at < KEY_TTL_MS) return keyCache.info;
   try {
-    const res = await fetch(`${cfg.baseUrl}/key`, {
-      headers: authHeaders(),
-      signal: AbortSignal.timeout(5000),
-    });
+    const opts = { headers: authHeaders(), signal: AbortSignal.timeout(5000) };
+    const res = dispatcher
+      ? await undiciFetch(`${cfg.baseUrl}/key`, { ...opts, dispatcher })
+      : await fetch(`${cfg.baseUrl}/key`, opts);
     const info = res.ok ? ((await res.json()) as { data?: KeyInfo }).data ?? null : null;
     keyCache = { at: Date.now(), info };
     return info;
@@ -112,10 +116,10 @@ async function fetchModelInfo(): Promise<ModelInfo | null> {
   if (!cfg.apiKey) return null;
   if (modelCache && Date.now() - modelCache.at < MODELS_TTL_MS) return modelCache.info;
   try {
-    const res = await fetch(`${cfg.baseUrl}/models`, {
-      headers: authHeaders(),
-      signal: AbortSignal.timeout(5000),
-    });
+    const opts = { headers: authHeaders(), signal: AbortSignal.timeout(5000) };
+    const res = dispatcher
+      ? await undiciFetch(`${cfg.baseUrl}/models`, { ...opts, dispatcher })
+      : await fetch(`${cfg.baseUrl}/models`, opts);
     if (!res.ok) {
       modelCache = { at: Date.now(), info: null };
       return null;
@@ -166,6 +170,7 @@ export const openRouter: LlmProvider = {
       extraBody: EXTRA_BODY,
       label: 'OpenRouter',
       onToken,
+      dispatcher,
     });
   },
 
@@ -181,6 +186,7 @@ export const openRouter: LlmProvider = {
       timeoutMs: gen.timeoutMs,
       extraBody: EXTRA_BODY,
       label: 'OpenRouter caption',
+      dispatcher,
     });
     return caption.replace(/\s*\n+\s*/g, ' ');
   },
@@ -235,6 +241,7 @@ export async function summarize(systemPrompt: string, transcript: string): Promi
     timeoutMs: config.summary.timeoutMs,
     extraBody: { reasoning: { enabled: false } },
     label: 'Summary',
+    dispatcher,
   });
   return content;
 }

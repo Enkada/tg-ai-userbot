@@ -22,7 +22,8 @@
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "gpt-tokenizer": "^3.4.0",
-    "tsx": "^4.22.4"
+    "tsx": "^4.22.4",
+    "undici": "^8.7.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

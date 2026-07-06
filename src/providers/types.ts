@@ -4,6 +4,7 @@
  * OpenAI-compatible chat-completion call used by both llama.cpp and OpenRouter
  * (they differ only in URL, auth headers, and a few body fields).
  */
+import { fetch as undiciFetch, type Dispatcher } from 'undici';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -116,10 +117,12 @@ export async function openaiChatCompletionStream(opts: {
   label?: string;
   /** Per-token sink; omit to collect the completion without streaming it anywhere. */
   onToken?: TokenSink;
+  /** Undici dispatcher (e.g. a ProxyAgent) to route this call through. Omit to connect direct. */
+  dispatcher?: Dispatcher;
 }): Promise<ChatResult> {
-  const { url, headers, model, messages, temperature, maxTokens, timeoutMs, extraBody, label = 'LLM', onToken } = opts;
+  const { url, headers, model, messages, temperature, maxTokens, timeoutMs, extraBody, label = 'LLM', onToken, dispatcher } = opts;
 
-  const res = await fetch(url, {
+  const fetchOpts = {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     signal: AbortSignal.timeout(timeoutMs),
@@ -131,7 +134,9 @@ export async function openaiChatCompletionStream(opts: {
       max_tokens: maxTokens,
       ...extraBody,
     }),
-  });
+  };
+  // See the module-doc note above: a dispatcher requires undici's own fetch, not the global one.
+  const res = dispatcher ? await undiciFetch(url, { ...fetchOpts, dispatcher }) : await fetch(url, fetchOpts);
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
