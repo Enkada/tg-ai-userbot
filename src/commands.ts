@@ -30,6 +30,7 @@ import {
   MIN_WINDOW,
   STEP,
 } from './memory.js';
+import { withReplyCue } from './generate.js';
 import { forgetDebris } from './panel.js';
 import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
 import { renderMarkdown } from './format.js';
@@ -327,9 +328,11 @@ register({
     }
 
     // Regenerate against the context up to (but excluding) the reply we're replacing,
-    // so the model answers the last user message afresh.
+    // so the model answers the last user message afresh — with the same format cue a
+    // first-pass reply gets, so a reroll can't come back as a wall of text.
     const history = getWindow(chatId);
     while (history.length && history[history.length - 1].role === 'assistant') history.pop();
+    const rerollHistory = withReplyCue(history);
 
     const systemPrompt = renderSystemPrompt({ userName, chatId });
     const oldIds = last.tgMessageIds;
@@ -350,7 +353,7 @@ register({
       // Reroll is a single pass — one beginPass.
       regenerated = await withTyping(client, msg.chat, () => {
         streamer.beginPass();
-        return chat(systemPrompt, history, streamer.onToken);
+        return chat(systemPrompt, rerollHistory, streamer.onToken);
       });
     } catch {
       // If nothing streamed, the old reply is untouched — just report. If bubbles already

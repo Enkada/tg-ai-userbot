@@ -85,13 +85,43 @@ export async function generateReply(
 }
 
 /**
+ * Ephemeral format cue appended to the final user turn of every reactive generation (and
+ * reroll). It rides the prompt *tail* because that's the only position that out-competes the
+ * in-context pattern: the window carries ~30 of the bot's own recent replies, and once those
+ * run long the top-of-prompt persona rule loses to them (measured drift: 2.7 → 5.7 avg
+ * sentences over 583 replies, while the tail-cued proactive openers held at ~3.2 in the same
+ * windows). This wording tested at 2-3 sentences on casual turns, stretching to ~5 on packed
+ * ones and fully opening on an explicit ask, with 0/108 echo/acknowledgment. The numeric
+ * ceiling ("up to 5") is load-bearing — an open-ended "take the room you need" variant blew
+ * up to 17-sentence walls. Never stored: applied at history-build time only, so the DB,
+ * summaries, and /dump stay clean.
+ */
+export const REPLY_FORMAT_CUE =
+  '[System note: you text in short bursts - answer in 1-3 casual sentences, single paragraph. ' +
+  'If there is genuinely a lot to respond to, up to 5, never a wall of text. ' +
+  'Longer only when explicitly requested.]';
+
+/**
+ * Returns `history` with {@link REPLY_FORMAT_CUE} appended to the trailing user turn — after
+ * the photo/search blocks getWindow already composed into it. No-op when the last turn isn't
+ * a user message. Proactive openers never pass through here: their director cue carries its
+ * own "keep it short", and stacking both would double-cue the turn.
+ */
+export function withReplyCue(history: ChatMessage[]): ChatMessage[] {
+  const last = history[history.length - 1];
+  if (!last || last.role !== 'user') return history;
+  return [...history.slice(0, -1), { role: 'user', content: `${last.content}\n${REPLY_FORMAT_CUE}` }];
+}
+
+/**
  * Reactive strategy: persist each search against the triggering user message (`userRowId`)
  * and rebuild the window from the DB, so the result is injected as a `[you already searched
- * the web …]` block on that turn and carried into future context.
+ * the web …]` block on that turn and carried into future context. The rebuilt window gets
+ * the format cue on its final user turn (see {@link REPLY_FORMAT_CUE}).
  */
 export function persistedSearchStrategy(chatId: number, userRowId: number): ToolLoopStrategy {
   return {
-    buildHistory: () => getWindow(chatId),
+    buildHistory: () => withReplyCue(getWindow(chatId)),
     recordSearch: (idx, query, summary) => saveSearch(userRowId, idx, query, summary),
   };
 }
