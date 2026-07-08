@@ -83,7 +83,7 @@ export const config = {
   dbPath: process.env.DB_PATH ?? 'data/userbot.db',
   /**
    * Optional proxy for the MTProto connection, used where Telegram's data centres are
-   * blocked at the network level (e.g. a Russian host). Accepts any URL understood by
+   * blocked at the network level. Accepts any URL understood by
    * mtcute's `proxyTransportFromUrl`: `socks5://user:pass@host:port`,
    * `http://user:pass@host:port`, or an MTProxy `https://t.me/proxy?server=…&port=…&secret=…`.
    * Unset ⇒ connect directly. The proxy only sees encrypted MTProto, never message contents.

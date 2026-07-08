@@ -122,7 +122,10 @@ export async function openaiChatCompletionStream(opts: {
 }): Promise<ChatResult> {
   const { url, headers, model, messages, temperature, maxTokens, timeoutMs, extraBody, label = 'LLM', onToken, dispatcher } = opts;
 
-  const fetchOpts = {
+  // undici's own fetch is used everywhere so an optional `dispatcher` (e.g. a proxy) can be
+  // passed straight through; a `dispatcher` of undefined falls back to the global dispatcher,
+  // i.e. a direct connection. (Node's built-in fetch rejects an externally-built dispatcher.)
+  const res = await undiciFetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
     signal: AbortSignal.timeout(timeoutMs),
@@ -134,9 +137,8 @@ export async function openaiChatCompletionStream(opts: {
       max_tokens: maxTokens,
       ...extraBody,
     }),
-  };
-  // See the module-doc note above: a dispatcher requires undici's own fetch, not the global one.
-  const res = dispatcher ? await undiciFetch(url, { ...fetchOpts, dispatcher }) : await fetch(url, fetchOpts);
+    dispatcher,
+  });
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');

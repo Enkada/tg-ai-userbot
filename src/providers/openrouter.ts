@@ -6,7 +6,7 @@
  * for token counting (OpenRouter has no tokenize endpoint).
  */
 import { encode } from 'gpt-tokenizer';
-import { fetch as undiciFetch } from 'undici';
+import { fetch } from 'undici';
 import { config } from '../config.js';
 import { getOpenRouterDispatcher } from './proxyAgent.js';
 import {
@@ -20,7 +20,7 @@ import {
 const cfg = config.llm.openrouter;
 const gen = config.llm;
 const CHAT_URL = `${cfg.baseUrl}/chat/completions`;
-/** Same VDS IP that gets Telegram's DCs blocked also trips OpenRouter's WAF; route around it. */
+/** Optional proxy for OpenRouter's calls (see {@link getOpenRouterDispatcher}); undefined ⇒ direct. */
 const dispatcher = getOpenRouterDispatcher();
 
 /**
@@ -100,10 +100,11 @@ async function fetchKeyInfo(): Promise<KeyInfo | null> {
   if (!cfg.apiKey) return null;
   if (keyCache && Date.now() - keyCache.at < KEY_TTL_MS) return keyCache.info;
   try {
-    const opts = { headers: authHeaders(), signal: AbortSignal.timeout(5000) };
-    const res = dispatcher
-      ? await undiciFetch(`${cfg.baseUrl}/key`, { ...opts, dispatcher })
-      : await fetch(`${cfg.baseUrl}/key`, opts);
+    const res = await fetch(`${cfg.baseUrl}/key`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(5000),
+      dispatcher,
+    });
     const info = res.ok ? ((await res.json()) as { data?: KeyInfo }).data ?? null : null;
     keyCache = { at: Date.now(), info };
     return info;
@@ -116,10 +117,11 @@ async function fetchModelInfo(): Promise<ModelInfo | null> {
   if (!cfg.apiKey) return null;
   if (modelCache && Date.now() - modelCache.at < MODELS_TTL_MS) return modelCache.info;
   try {
-    const opts = { headers: authHeaders(), signal: AbortSignal.timeout(5000) };
-    const res = dispatcher
-      ? await undiciFetch(`${cfg.baseUrl}/models`, { ...opts, dispatcher })
-      : await fetch(`${cfg.baseUrl}/models`, opts);
+    const res = await fetch(`${cfg.baseUrl}/models`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(5000),
+      dispatcher,
+    });
     if (!res.ok) {
       modelCache = { at: Date.now(), info: null };
       return null;
