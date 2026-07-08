@@ -55,8 +55,8 @@ export type MessageRow = typeof messages.$inferSelect;
 /**
  * Image attachments for a message. Each row is one image's text description (caption),
  * produced by a vision pass over the photo at receive time. Captions are kept here —
- * not baked into `messages.content` — and injected as `[image N: …]` blocks only when
- * the context window is built, so the stored user text stays clean and the captions can
+ * not baked into `messages.content` — and injected as `[<user> sent a photo: …]` blocks only
+ * when the context window is built, so the stored user text stays clean and the captions can
  * later be trimmed from old turns without rewriting message rows.
  *
  * `idx` orders multiple images within one message (0-based). One image per message today;
@@ -83,9 +83,9 @@ export type AttachmentRow = typeof attachments.$inferSelect;
 /**
  * Web-search results for a message. Each row is one search (query + distilled summary)
  * the model ran while answering. Like {@link attachments}, the summary is kept here —
- * not baked into `messages.content` — and injected as a `[web search "…": …]` block when
- * the context window is built, placed *after* the user's text (a search is a response to
- * the question, unlike an image which precedes it in Telegram's UI).
+ * not baked into `messages.content` — and injected as a `[you already searched the web for
+ * "…" - results: …]` block when the context window is built, placed *after* the user's text
+ * (a search is a response to the question, unlike an image which precedes it in Telegram's UI).
  *
  * `idx` orders multiple searches within one turn (0-based) — the model may search more
  * than once per message (capped) when the first result isn't enough.

@@ -73,7 +73,7 @@ export const llamaCpp: LlmProvider = {
       extraBody: REASONING_OFF,
       label: 'Caption',
     });
-    // Collapse newlines — a caption is a single inline block inside `[image: …]`.
+    // Collapse newlines — a caption is a single inline block inside `[<user> sent a photo: …]`.
     return caption.replace(/\s*\n+\s*/g, ' ');
   },
 

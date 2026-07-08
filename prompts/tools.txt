@@ -3,7 +3,7 @@ Your knowledge has a cutoff, so treat your memory of anything current (who holds
 
 To call a tool, output ONE line, nothing else:
 <tool_call>{"name": "TOOL_NAME", "arguments": { ... }}</tool_call>
-The result returns as a [web search "…": …] block — use it in your own voice; don't mention searching or quote it verbatim.
+The result returns as a [you already searched the web for "…" - results: …] block — use it in your own voice; don't mention searching or quote it verbatim. {{user}} never sees these results — if they asked for specifics (temperature, price, time, name), say the actual numbers/names in your reply.
 
 Example — User: who's the president of france right now?
 <tool_call>{"name": "web_search", "arguments": {"query": "current president of France"}}</tool_call>

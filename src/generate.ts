@@ -86,8 +86,8 @@ export async function generateReply(
 
 /**
  * Reactive strategy: persist each search against the triggering user message (`userRowId`)
- * and rebuild the window from the DB, so the result is injected as a `[web search …]` block
- * on that turn and carried into future context.
+ * and rebuild the window from the DB, so the result is injected as a `[you already searched
+ * the web …]` block on that turn and carried into future context.
  */
 export function persistedSearchStrategy(chatId: number, userRowId: number): ToolLoopStrategy {
   return {

@@ -169,7 +169,7 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       const userRowId = saveMessage(chatId, 'user', text, [msg.id]);
       if (imagePhoto) {
         // Vision pass → caption, linked to the user row. It's injected into the window as
-        // an `[image: …]` block; the chat model sees text, never the pixels.
+        // a `[<user> sent a photo: …]` block; the chat model sees text, never the pixels.
         const bytes = await client.downloadAsBuffer(imagePhoto);
         const caption = await describeImage(Buffer.from(bytes).toString('base64'));
         saveAttachment(userRowId, 0, caption);

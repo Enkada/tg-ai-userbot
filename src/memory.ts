@@ -79,8 +79,8 @@ export function saveMessage(
 
 /**
  * Records one image's caption against a message row (see {@link saveMessage}). `idx`
- * is the image's 0-based position within the message. The caption is injected as an
- * `[image …]` block when the window is built, not stored in the message content.
+ * is the image's 0-based position within the message. The caption is injected as a
+ * `[<user> sent a photo: …]` block when the window is built, not stored in the message content.
  */
 export function saveAttachment(messageId: number, idx: number, caption: string): void {
   db.insert(attachments).values({ messageId, idx, caption }).run();
@@ -90,8 +90,8 @@ export function saveAttachment(messageId: number, idx: number, caption: string):
  * Records one web search (query + distilled summary) against a message row — the user
  * turn that triggered it (see {@link saveMessage}). `idx` is the search's 0-based position
  * within the turn (a message may trigger several, capped). The summary is injected as a
- * `[web search "…": …]` block after the message text when the window is built, not stored
- * in the message content.
+ * `[you already searched the web for "…" - results: …]` block after the message text when
+ * the window is built, not stored in the message content.
  */
 export function saveSearch(messageId: number, idx: number, query: string, summary: string): void {
   db.insert(searches).values({ messageId, idx, query, summary }).run();
@@ -231,13 +231,29 @@ export function updateMessageContent(
 }
 
 /**
- * Renders a message's image captions as `[image …]` block(s), prepended above its text.
- * A single image gets `[image: …]`; multiple are numbered `[image 1: …]`, `[image 2: …]`.
+ * Display name used inside photo cues, from the per-chat cache kept by
+ * {@link rememberUserName} (written on every incoming message, so any chat that has photo
+ * rows has a name). The 'user' fallback can only show before the first message ever lands.
  */
-function withCaptions(content: string, captions: string[]): string {
+function chatUserName(chatId: number): string {
+  return getSummaryState(chatId)?.userName ?? 'user';
+}
+
+/**
+ * Renders a message's image captions as `[<user> sent a photo: …]` block(s), prepended above
+ * its text; multiple are numbered `[<user> sent photo 1: …]`, `[<user> sent photo 2: …]`.
+ * The event phrasing ("X sent a photo") over a bare `[image: …]` tag is deliberate: the
+ * assistant would never say that about itself, which measurably stops the model from
+ * opening its reply with a copy of the block (tested 1/10 → 0/10 echo on meme photos).
+ */
+function withCaptions(content: string, captions: string[], userName: string): string {
   if (captions.length === 0) return content;
   const blocks = captions
-    .map((c, i) => (captions.length === 1 ? `[image: ${c}]` : `[image ${i + 1}: ${c}]`))
+    .map((c, i) =>
+      captions.length === 1
+        ? `[${userName} sent a photo: ${c}]`
+        : `[${userName} sent photo ${i + 1}: ${c}]`,
+    )
     .join('\n');
   // Photo-only messages have empty content — then the blocks are the whole turn.
   return content ? `${blocks}\n${content}` : blocks;
@@ -250,14 +266,23 @@ export interface SearchEntry {
 }
 
 /**
- * Appends a message's web-search results as `[web search "query": …]` block(s) *after*
- * its text — a search answers the question, so it follows it (unlike an image caption,
- * which precedes the text to mirror Telegram's UI order). Exported so the proactive
- * opener's in-memory tool loop renders search blocks in the exact same format.
+ * Appends a message's web-search results as `[you already searched the web for "query" -
+ * results: …]` block(s) *after* its text — a search answers the question, so it follows it
+ * (unlike an image caption, which precedes the text to mirror Telegram's UI order). Exported
+ * so the proactive opener's in-memory tool loop renders search blocks in the exact same format.
+ *
+ * The second-person "you already searched" phrasing is what tells the model this is *its own*
+ * completed search, not text the user typed: the neutral `[web search "…": …]` form made it
+ * re-emit a near-identical tool call up to 10/10 times on volatile topics (exchange rates),
+ * and the "already" inside the cue — not instructions in tools.txt — is what cut that to 3/12
+ * while keeping fact relay intact. Plain `-` (not an em dash) so the stored form survives
+ * {@link sanitize} unchanged.
  */
 export function withSearches(content: string, results: SearchEntry[]): string {
   if (results.length === 0) return content;
-  const blocks = results.map((r) => `[web search "${r.query}":\n${r.summary}]`).join('\n');
+  const blocks = results
+    .map((r) => `[you already searched the web for "${r.query}" - results:\n${r.summary}]`)
+    .join('\n');
   return content ? `${content}\n${blocks}` : blocks;
 }
 
@@ -306,6 +331,7 @@ export function getWindow(chatId: number): ChatMessage[] {
     else searchesByMessage.set(s.messageId, [entry]);
   }
 
+  const userName = chatUserName(chatId);
   return rows.map(({ id, role, content }) => ({
     role,
     // Captions precede the text; search results follow it. Sanitize the composed turn (window-
@@ -313,7 +339,7 @@ export function getWindow(chatId: number): ChatMessage[] {
     // tells in model-written captions / external search text — reach the LLM in plain form too.
     content: sanitize(
       withSearches(
-        withCaptions(content, captionsByMessage.get(id) ?? []),
+        withCaptions(content, captionsByMessage.get(id) ?? [], userName),
         searchesByMessage.get(id) ?? [],
       ),
     ),
@@ -424,12 +450,13 @@ export function getDayMessages(chatId: number, start: number, end: number): Chat
     else searchesByMessage.set(s.messageId, [entry]);
   }
 
+  const userName = chatUserName(chatId);
   return rows.map(({ id, role, content }) => ({
     role,
     // Same window-build cleanup as getWindow: hand the summarizer plain-keyboard text.
     content: sanitize(
       withSearches(
-        withCaptions(content, captionsByMessage.get(id) ?? []),
+        withCaptions(content, captionsByMessage.get(id) ?? [], userName),
         searchesByMessage.get(id) ?? [],
       ),
     ),

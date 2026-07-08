@@ -122,6 +122,11 @@ const NO_ANSWER = "couldn't dig that up, sorry — try rephrasing?";
  * so no raw tag reaches the chat — falling back to {@link NO_ANSWER} if nothing remains. A
  * reply with no tag, or with a *malformed* tag, is returned unchanged (sent as-is, which
  * surfaces a misbehaving model for debugging by design).
+ *
+ * NOTE: an echoed leading `[…]` annotation (the model copying an injected cue like
+ * `[<user> sent a photo: …]`) is deliberately NOT stripped here — the cue-format prompt
+ * changes drove organic echoes to ~0, and we keep the raw output transparent (visible in
+ * chat and persisted) rather than silently repairing it. See {@link withCaptions}.
  */
 export function finalizeReply(content: string): string {
   if (!parseToolCall(content)) return content;
