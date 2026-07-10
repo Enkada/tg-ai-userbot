@@ -6,7 +6,7 @@
  */
 import { createLogger } from './logger.js';
 import { llamaCpp } from './providers/llamacpp.js';
-import { openRouter } from './providers/openrouter.js';
+import { captionImage, isCaptionConfigured, openRouter } from './providers/openrouter.js';
 import type { ChatMessage, ChatResult, LlmProvider, ProviderId, ProviderStatus, TokenSink } from './providers/types.js';
 
 export type { ChatMessage, ChatResult, TokenSink } from './providers/types.js';
@@ -49,8 +49,17 @@ export const chat = (
   onToken?: TokenSink,
 ): Promise<ChatResult> => active.chat(systemPrompt, history, onToken);
 
-export const describeImage = (base64: string, mime?: string): Promise<string> =>
-  active.describeImage(base64, mime);
+/**
+ * Captions one image. Prefers the active provider's own model when it has vision — free local
+ * `--mmproj` vision, or an OpenRouter chat model that accepts images — so the common case stays
+ * on the active backend. When the active model is text-only, falls back to the dedicated
+ * OpenRouter caption model ({@link config.llm.captionModel}). Assumes {@link canCaptionImages}
+ * held when the caller decided to handle the photo.
+ */
+export async function describeImage(base64: string, mime?: string): Promise<string> {
+  if (await getVisionSupport()) return active.describeImage(base64, mime);
+  return captionImage(base64, mime);
+}
 
 export const getMaxContext = (): Promise<number | null> => active.getMaxContext();
 
@@ -60,6 +69,15 @@ export const countContextTokens = (systemPrompt: string, history: ChatMessage[])
 /** Whether the active provider's model accepts image input. */
 export async function getVisionSupport(): Promise<boolean> {
   return (await active.status()).vision;
+}
+
+/**
+ * Whether an incoming photo can be captioned at all — either the active model has vision, or a
+ * dedicated OpenRouter caption model is configured as a fallback. Gates photo handling in the
+ * message flow so a photo is only accepted when {@link describeImage} can actually caption it.
+ */
+export async function canCaptionImages(): Promise<boolean> {
+  return (await getVisionSupport()) || isCaptionConfigured();
 }
 
 export interface LlmStatus extends ProviderStatus {}

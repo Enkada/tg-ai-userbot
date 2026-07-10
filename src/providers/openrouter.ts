@@ -221,6 +221,37 @@ export const openRouter: LlmProvider = {
   },
 };
 
+/** Whether the dedicated OpenRouter caption fallback is available (key + CAPTION_MODEL set). */
+export function isCaptionConfigured(): boolean {
+  return Boolean(cfg.apiKey && gen.captionModel);
+}
+
+/**
+ * Dedicated image-captioning call, used as the vision fallback when the *active* chat model
+ * can't see images (see {@link import('../llm.js').describeImage}). Like {@link summarize}, it
+ * targets its own slug ({@link config.llm.captionModel}, not the chat one), is non-streaming,
+ * and omits the chat path's upstream {@link PROVIDER_ROUTING} (that order is tuned for the Gemma
+ * chat model and would mis-route a vision model). Throws if key or CAPTION_MODEL is missing.
+ */
+export async function captionImage(base64: string, mime = 'image/jpeg'): Promise<string> {
+  if (!cfg.apiKey || !gen.captionModel) {
+    throw new Error('Caption fallback requires OpenRouter (OPENROUTER_API_KEY) and CAPTION_MODEL');
+  }
+  const { content: caption } = await openaiChatCompletionStream({
+    url: CHAT_URL,
+    headers: authHeaders(),
+    model: gen.captionModel,
+    messages: captionMessages(base64, mime),
+    temperature: gen.captionTemperature,
+    maxTokens: gen.captionMaxTokens,
+    timeoutMs: gen.timeoutMs,
+    extraBody: { reasoning: { enabled: false } },
+    label: 'OpenRouter caption (fallback)',
+    dispatcher,
+  });
+  return caption.replace(/\s*\n+\s*/g, ' ');
+}
+
 /**
  * One-shot summarization call, used by the long-term-memory scheduler. Deliberately separate
  * from {@link openRouter.chat}: it targets a dedicated model ({@link config.summary.model}, not

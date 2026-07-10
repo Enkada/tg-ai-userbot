@@ -3,7 +3,7 @@ import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
 import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
 import { dropPanel, showPanel, sweepDebris, trackDebris, untrackDebris } from './panel.js';
-import { activeProviderId, describeImage, getVisionSupport, initProvider } from './llm.js';
+import { activeProviderId, canCaptionImages, describeImage, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
 import { initPersona } from './persona.js';
@@ -140,12 +140,13 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
     return;
   }
 
-  // A photo is only usable if the loaded model actually has vision (an --mmproj projector).
-  // Without it, fall back to the old behaviour and ignore the image — and if there's no
-  // caption text to answer instead, there's nothing to respond to at all, so bail early.
+  // A photo is only usable if we can caption it: either the active model has vision (an
+  // --mmproj projector / a vision chat model), or a dedicated OpenRouter caption model is
+  // configured as a fallback. Otherwise ignore the image — and if there's no caption text to
+  // answer instead, there's nothing to respond to at all, so bail early.
   let imagePhoto = photo;
-  if (imagePhoto && !(await getVisionSupport())) {
-    log.info('Model has no vision support; ignoring attached photo.');
+  if (imagePhoto && !(await canCaptionImages())) {
+    log.info('No vision model available (active model text-only, no caption fallback); ignoring attached photo.');
     imagePhoto = null;
     if (!text) return;
   }

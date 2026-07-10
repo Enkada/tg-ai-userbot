@@ -114,6 +114,14 @@ export const config = {
     captionMaxTokens: numberEnv('LLM_CAPTION_MAX_TOKENS', 150),
     /** Lower than chat temperature: captions should be factual, not creative. */
     captionTemperature: numberEnv('LLM_CAPTION_TEMPERATURE', 0.3),
+    /**
+     * Optional dedicated OpenRouter vision slug used to caption photos when the *active* chat
+     * model can't see images (e.g. a text-only local model). When the active model has vision,
+     * it captions with its own model and this is unused; only the fallback path reads it. Unset
+     * ⇒ no fallback, so a photo is dropped whenever the active model lacks vision. Routed through
+     * OpenRouter like {@link config.summary.model}, so it also requires OPENROUTER_API_KEY.
+     */
+    captionModel: process.env.CAPTION_MODEL?.trim() || undefined,
     /** Hard cap on a single generation request, so a hung server can't wedge a chat. */
     timeoutMs: numberEnv('LLM_TIMEOUT_MS', 120_000),
     // ---- Local provider (llama.cpp, OpenAI-compatible) — the primary ----

@@ -156,6 +156,20 @@ register({
       return `• ${p.label}: online ✅ · \`${p.model ?? 'unknown'}\` · ${vision}${tag}`;
     });
 
+    // Dedicated OpenRouter vision model that captions photos when the active model is text-only.
+    const captionModel = config.llm.captionModel;
+    let captionLine: string;
+    if (!captionModel) {
+      captionLine = '• Image caption fallback: not configured';
+    } else if (!config.llm.openrouter.apiKey) {
+      captionLine = `• Image caption fallback: \`${captionModel}\` · ⚠️ needs OPENROUTER_API_KEY`;
+    } else {
+      // Only engaged while the active model can't see images; otherwise it captions itself.
+      const active = providers.find((p) => p.active);
+      const state = active && !active.vision ? 'active ✅' : 'idle (active model has vision)';
+      captionLine = `• Image caption fallback: \`${captionModel}\` · ${state}`;
+    }
+
     // Web search: configured? plus plan + credit usage when the API answers.
     let searchLine: string;
     if (!isSearchConfigured()) {
@@ -181,6 +195,7 @@ Whitelisted users: **${config.whitelist.size}**
 
 **🧠 LLM providers**
 ${lines.join('\n')}
+${captionLine}
 
 **🔎 Web search**
 ${searchLine}`),

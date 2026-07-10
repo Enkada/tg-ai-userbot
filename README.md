@@ -145,6 +145,7 @@ independent of the active chat provider, so it has full context regardless of th
    - `SESSION_PATH` — where the SQLite session is stored (default `data/userbot.session`)
    - `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` — the local llama.cpp server (primary)
    - `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` — cloud fallback (leave the key blank to disable)
+   - `CAPTION_MODEL` — optional OpenRouter vision slug for captioning photos when the active chat model is text-only (blank = photos dropped without vision)
    - `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, … — shared generation params (apply to either provider)
 
 ## First login (one-time, interactive)
