@@ -23,6 +23,7 @@ import type { InputPeerLike, TelegramClient } from '@mtcute/node';
 import { config } from './config.js';
 import { SentenceSplitter, splitMessage } from './chunker.js';
 import { renderMarkdown } from './format.js';
+import { sanitize } from './sanitize.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -100,7 +101,18 @@ export class ReplyStreamer {
   /** Push prose text through the splitter, sending each completed bubble. */
   private async feed(text: string): Promise<void> {
     this.streamed += text;
-    for (const bubble of this.splitter.push(text)) await this.send(bubble);
+    for (const bubble of this.splitter.push(text)) await this.sendClean(bubble);
+  }
+
+  /**
+   * Sanitize a bubble and re-split before sending. The raw stream is chunked unsanitized, and
+   * sanitizing can surface a boundary the raw text hid — `2025."` becomes `2025".`, whose
+   * trailing dot only a fresh split pass strips — so a single raw bubble may become several
+   * clean ones. Without this, sanitize would run only inside {@link renderMarkdown}, *after*
+   * the splitter, and the moved dot would reach the chat.
+   */
+  private async sendClean(bubble: string): Promise<void> {
+    for (const piece of splitMessage(sanitize(bubble))) await this.send(piece);
   }
 
   /** Send one bubble, pacing it like typing and keeping "typing…" up across the wait. */
@@ -131,10 +143,10 @@ export class ReplyStreamer {
         await this.feed(this.pending);
         this.pending = '';
       }
-      for (const bubble of this.splitter.flush()) await this.send(bubble);
+      for (const bubble of this.splitter.flush()) await this.sendClean(bubble);
     }
     if (!this.sentAny) {
-      const bubbles = splitMessage(finalText);
+      const bubbles = splitMessage(sanitize(finalText));
       for (const bubble of bubbles.length ? bubbles : [finalText.trim() || '…']) await this.send(bubble);
     }
     return this.sentIds;
