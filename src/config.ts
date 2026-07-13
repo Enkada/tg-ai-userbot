@@ -32,6 +32,21 @@ function numberEnv(name: string, fallback: number): number {
 }
 
 /**
+ * Reads an optional numeric environment variable: unset/blank ⇒ undefined (callers omit
+ * the field from request bodies entirely, leaving the serving provider's default in
+ * effect), non-numeric ⇒ throw, same as {@link numberEnv}.
+ */
+function optionalNumberEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Environment variable ${name} must be a number, got: "${raw}"`);
+  }
+  return value;
+}
+
+/**
  * Parses a comma-separated list of numeric Telegram user IDs.
  */
 function parseIdList(raw: string | undefined): number[] {
@@ -110,6 +125,17 @@ export const config = {
     // ---- Shared generation params (apply to whichever provider is active) ----
     temperature: numberEnv('LLM_TEMPERATURE', 0.7),
     maxTokens: numberEnv('LLM_MAX_TOKENS', 512),
+    /**
+     * Optional sampling knobs for the CHAT path only (captions and summaries keep their
+     * own low-temperature settings). Each is sent verbatim as its OpenAI-style field when
+     * set and omitted from the request entirely when blank — there are no code defaults,
+     * so a blank knob means "whatever the serving provider defaults to". Guidance for the
+     * current model lives in .env.example.
+     */
+    topP: optionalNumberEnv('LLM_TOP_P'),
+    minP: optionalNumberEnv('LLM_MIN_P'),
+    presencePenalty: optionalNumberEnv('LLM_PRESENCE_PENALTY'),
+    frequencyPenalty: optionalNumberEnv('LLM_FREQUENCY_PENALTY'),
     /** Hard cap on an image caption's length — the backstop against verbose descriptions. */
     captionMaxTokens: numberEnv('LLM_CAPTION_MAX_TOKENS', 150),
     /** Lower than chat temperature: captions should be factual, not creative. */

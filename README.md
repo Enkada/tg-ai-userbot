@@ -147,6 +147,7 @@ independent of the active chat provider, so it has full context regardless of th
    - `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` — cloud fallback (leave the key blank to disable)
    - `CAPTION_MODEL` — optional OpenRouter vision slug for captioning photos when the active chat model is text-only (blank = photos dropped without vision)
    - `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, … — shared generation params (apply to either provider)
+   - `LLM_TOP_P`, `LLM_MIN_P`, `LLM_PRESENCE_PENALTY`, `LLM_FREQUENCY_PENALTY` — optional chat-only sampling knobs; blank = not sent (provider default applies)
 
 ## First login (one-time, interactive)
 

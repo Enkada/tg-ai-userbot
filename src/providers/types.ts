@@ -110,6 +110,14 @@ export async function openaiChatCompletionStream(opts: {
   model: string;
   messages: OutboundMessage[];
   temperature: number;
+  /**
+   * Optional sampling knobs (chat path). Undefined ⇒ the field is omitted from the request
+   * body entirely, leaving the serving backend's own default in effect.
+   */
+  topP?: number;
+  minP?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
   maxTokens: number;
   timeoutMs: number;
   extraBody?: Record<string, unknown>;
@@ -120,7 +128,23 @@ export async function openaiChatCompletionStream(opts: {
   /** Undici dispatcher (e.g. a ProxyAgent) to route this call through. Omit to connect direct. */
   dispatcher?: Dispatcher;
 }): Promise<ChatResult> {
-  const { url, headers, model, messages, temperature, maxTokens, timeoutMs, extraBody, label = 'LLM', onToken, dispatcher } = opts;
+  const {
+    url,
+    headers,
+    model,
+    messages,
+    temperature,
+    topP,
+    minP,
+    presencePenalty,
+    frequencyPenalty,
+    maxTokens,
+    timeoutMs,
+    extraBody,
+    label = 'LLM',
+    onToken,
+    dispatcher,
+  } = opts;
 
   // undici's own fetch is used everywhere so an optional `dispatcher` (e.g. a proxy) can be
   // passed straight through; a `dispatcher` of undefined falls back to the global dispatcher,
@@ -134,6 +158,10 @@ export async function openaiChatCompletionStream(opts: {
       messages,
       stream: true,
       temperature,
+      ...(topP !== undefined && { top_p: topP }),
+      ...(minP !== undefined && { min_p: minP }),
+      ...(presencePenalty !== undefined && { presence_penalty: presencePenalty }),
+      ...(frequencyPenalty !== undefined && { frequency_penalty: frequencyPenalty }),
       max_tokens: maxTokens,
       ...extraBody,
     }),
