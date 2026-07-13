@@ -26,6 +26,14 @@ export function sanitize(text: string): string {
       .replace(/[‘’]/g, "'")
       // Single-glyph ellipsis → three dots.
       .replace(/…/g, '...')
+      // A period the model tucked inside a closing quote (American typesetting style). When a
+      // terminator already follows the quote (`world.".`), the inner period is redundant — drop
+      // it. Otherwise move it outside (`talks."` → `talks".`) so the chunker sees a confirmed
+      // boundary and can split there and strip the dot. Single periods only: a quoted trail-off
+      // (`"i mean..."`) is expressive and stays put — the `(?<!\.)` guard skips ellipsis runs.
+      // Neither output has a period left before a quote, so a second pass is a no-op.
+      .replace(/(?<!\.)\.(["'])(?=[.?!])/g, '$1')
+      .replace(/(?<!\.)\.(["'])/g, '$1.')
       // Non-breaking and narrow no-break spaces → an ordinary space.
       .replace(/[  ]/g, ' ')
       // The dash rule can leave a stray space at a line's end (a dash that sat before a newline);
