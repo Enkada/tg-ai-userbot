@@ -16,7 +16,11 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
   block, so the character recalls past days beyond the live window (see below).
 - Renders **Markdown** in replies (bold, code, links…).
 - Shows a live **"typing…"** status while the model generates (refreshed every ~5s).
-- Marks incoming messages as **read** on arrival.
+- **Human pacing**: messages aren't read the instant they arrive — the longer the chat has
+  been idle, the longer the read receipt takes (sqrt curve, jittered, capped at ~15s, with an
+  occasional near-instant "had the phone in hand" read), and a short silent beat separates
+  the read receipt from the typing indicator (for photos, the vision pass runs inside that
+  beat). Commands and unsupported message types are still read instantly.
 - **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/persona`, `/dump`.
 - **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
   and command output lives in a single reusable **panel** message that each command edits

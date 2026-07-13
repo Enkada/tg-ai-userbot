@@ -176,6 +176,18 @@ export function getLastUserMessageAt(chatId: number): number | null {
   return row?.at ?? null;
 }
 
+/** Epoch ms of the latest non-deleted message from *either side*, or null if the chat is empty. */
+export function getLastMessageAt(chatId: number): number | null {
+  const row = db
+    .select({ at: messages.createdAt })
+    .from(messages)
+    .where(and(eq(messages.chatId, chatId), eq(messages.deleted, false)))
+    .orderBy(desc(messages.id))
+    .limit(1)
+    .get();
+  return row?.at ?? null;
+}
+
 /** Fields of a chat's proactive schedule that callers may update. */
 export interface ProactivePatch {
   /** Epoch ms the next check is due, or null to "unarm" (re-arm at next morning). */

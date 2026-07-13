@@ -197,6 +197,24 @@ export const config = {
     delayPerCharMs: numberEnv('STREAMING_DELAY_PER_CHAR_MS', 30),
     delayMaxMs: numberEnv('STREAMING_DELAY_MAX_MS', 3000),
   },
+  // ---- Human pacing: delayed reads + a silent reading beat before typing (pacing.ts) ----
+  pacing: {
+    /** Idle gap (minutes) under which a message is read instantly — you're both in the chat. */
+    thresholdMinutes: numberEnv('READ_DELAY_THRESHOLD', 3),
+    /** Hard cap (seconds) on the read delay. */
+    capSeconds: numberEnv('READ_DELAY_MAX', 15),
+    /** Idle gap (minutes) at which the read delay reaches the cap (sqrt curve in between). */
+    fullAtMinutes: numberEnv('READ_DELAY_FULL_AT', 130),
+    /** Chance (0–1) a long-idle message is read in 2–3s anyway ("she had the phone in hand"). */
+    instantChance: numberEnv('READ_DELAY_INSTANT_CHANCE', 0.15),
+    /**
+     * The silent read→typing pause: `base + textLength × perChar` ms, capped at `max` —
+     * time spent reading the message before the typing indicator may appear.
+     */
+    pauseBaseMs: numberEnv('READ_PAUSE_BASE_MS', 400),
+    pausePerCharMs: numberEnv('READ_PAUSE_PER_CHAR_MS', 25),
+    pauseMaxMs: numberEnv('READ_PAUSE_MAX_MS', 2500),
+  },
   // ---- Tavily web search (https://app.tavily.com) — powers the bot's web_search tool ----
   tavily: {
     /** API key (tvly-…). Absent ⇒ search is disabled and the tool is never offered. */

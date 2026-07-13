@@ -7,7 +7,8 @@ import { activeProviderId, canCaptionImages, describeImage, initProvider } from 
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
 import { initPersona } from './persona.js';
-import { rememberUserName, saveAttachment, saveMessage } from './memory.js';
+import { getLastMessageAt, rememberUserName, saveAttachment, saveMessage } from './memory.js';
+import { photoBeatMs, readDelayMs, readPauseMs, sleep } from './pacing.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
 import { finalizeReply } from './tools.js';
 import { ReplyStreamer } from './send.js';
@@ -55,29 +56,36 @@ function handleMessage(msg: Message, selfName: string): void {
 
 /** Processes one message to completion (command routing or a full LLM round-trip). */
 async function processMessage(msg: Message, senderId: number, selfName: string): Promise<void> {
-  // Mark the sender's message as read as soon as we start handling it.
-  await client.readHistory(msg.chat, { maxId: msg.id });
-
   // `text` is the message text, or the caption when a photo is attached ('' if neither).
   const text = msg.text;
   // We handle photos (described via a vision pass) and plain text. Everything else —
   // stickers, voice, video, documents — is silently ignored, as before.
   const photo = msg.media?.type === 'photo' ? msg.media : null;
-  if (!text && !photo) return;
+
+  // Unsupported types are read instantly and dropped: no reply will follow, so a delayed
+  // read would just dangle ("she saw it moments later and said nothing").
+  if (!text && !photo) {
+    await client.readHistory(msg.chat, { maxId: msg.id });
+    return;
+  }
 
   // Memory is keyed by chat id (the DM peer).
   const chatId = msg.chat.id;
   // Display name of the user we're talking to, for the {{user}} prompt tag.
   const userName = msg.sender.displayName;
-  // The user is active: reset the proactive silence timer (and cache their name). Covers
-  // commands too — any interaction counts as "they're here", so don't reach out right now.
-  onUserActivity(chatId, userName);
-  // Cache the name for the off-line summarizer too (independent of the proactive feature).
-  rememberUserName(chatId, userName);
+  // The user is active: reset the proactive silence timer and cache their name (also for the
+  // off-line summarizer). Covers commands too — any interaction counts as "they're here".
+  const noteActivity = (): void => {
+    onUserActivity(chatId, userName);
+    rememberUserName(chatId, userName);
+  };
   // A photo's caption is never treated as a slash command — commands are text-only.
   const parsed = photo ? null : parseCommand(text);
 
   if (parsed) {
+    // Commands are control UI, not conversation: read instantly, no human pacing.
+    await client.readHistory(msg.chat, { maxId: msg.id });
+    noteActivity();
     // Leftover /dump files and command messages stranded by a crash go first, so file
     // output never stacks. The panel itself stays — the handler edits it in place.
     await sweepDebris(client, msg.chat, chatId, ['file', 'command']);
@@ -143,13 +151,32 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   // A photo is only usable if we can caption it: either the active model has vision (an
   // --mmproj projector / a vision chat model), or a dedicated OpenRouter caption model is
   // configured as a fallback. Otherwise ignore the image — and if there's no caption text to
-  // answer instead, there's nothing to respond to at all, so bail early.
+  // answer instead, there's nothing to respond to at all: read instantly (like other
+  // unsupported types — no reply will follow) and bail.
   let imagePhoto = photo;
   if (imagePhoto && !(await canCaptionImages())) {
     log.info('No vision model available (active model text-only, no caption fallback); ignoring attached photo.');
     imagePhoto = null;
-    if (!text) return;
+    if (!text) {
+      await client.readHistory(msg.chat, { maxId: msg.id });
+      noteActivity();
+      return;
+    }
   }
+
+  // A reply will follow — so the human read-delay applies. The longer the chat has been
+  // idle (counting messages from either side), the longer "she" takes to notice this one;
+  // time it already spent waiting (queue, reconnect backlog) counts toward the delay, so an
+  // already-late read is never padded further. Curve and jitter live in pacing.ts.
+  const lastMessageAt = getLastMessageAt(chatId);
+  const idleMs = lastMessageAt == null ? 0 : Date.now() - lastMessageAt;
+  const readWait = readDelayMs(idleMs) - Math.max(0, Date.now() - msg.date.getTime());
+  if (readWait > 0) {
+    log.info(`Read delay ${(readWait / 1000).toFixed(1)}s (chat idle ${Math.round(idleMs / 60_000)}m)`);
+    await sleep(readWait);
+  }
+  await client.readHistory(msg.chat, { maxId: msg.id });
+  noteActivity();
 
   // A normal message arrived: sweep away all slash-command debris — the panel, /dump
   // files, stranded command messages — so it doesn't sit next to the conversation.
@@ -158,36 +185,52 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
 
   // Any non-command text (and/or a photo) from whitelisted users goes to the local LLM.
   log.info(`LLM request from ${senderId}: ${imagePhoto ? '[photo] ' : ''}${text.slice(0, 80)}`);
-  // The streamer sends the reply as bubbles while it generates; it's created out here so the
-  // catch block can recover whatever bubbles already landed if generation fails partway.
-  const streamer = new ReplyStreamer(client, msg.chat);
+  // The streamer sends the reply as bubbles while it generates. It's created only after the
+  // silent read→typing phase below (so first-bubble pacing measures from when "typing"
+  // believably began), but declared out here so the catch block can recover whatever
+  // bubbles already landed if generation fails partway.
+  let streamer: ReplyStreamer | undefined;
   try {
     const systemPrompt = renderSystemPrompt({ userName, chatId });
-    // Caption (if a photo), generate, and stream the reply under one typing indicator — all
-    // slow model passes. Persisting the user turn happens inside so the window includes it.
+    // Store the user message's Telegram id too, so /delete can revoke it in the chat.
+    const userRowId = saveMessage(chatId, 'user', text, [msg.id]);
+
+    // The silent read→typing beat: after the read receipt, "she" spends a moment on the
+    // message before any typing indicator may appear. Nothing is shown during it.
+    if (imagePhoto) {
+      // "Looking at the photo": the vision pass runs inside the beat, so its real latency
+      // is absorbed rather than stacked — the wait is max(caption pass, human glance). The
+      // caption links to the user row and is injected into the window as a
+      // `[<user> sent a photo: …]` block; the chat model sees text, never the pixels.
+      const beat = photoBeatMs();
+      const passStart = Date.now();
+      const bytes = await client.downloadAsBuffer(imagePhoto);
+      const caption = await describeImage(Buffer.from(bytes).toString('base64'));
+      saveAttachment(userRowId, 0, caption);
+      log.info(`Image caption: ${caption.slice(0, 120)}`);
+      await sleep(beat - (Date.now() - passStart));
+    } else {
+      // Reading the text at a fast-skim pace — the receipt and "typing…" never coincide.
+      await sleep(readPauseMs(text.length));
+    }
+
+    streamer = new ReplyStreamer(client, msg.chat);
+    // A const alias so the closure below sees a definitely-assigned streamer.
+    const sink = streamer;
+    // Generate and stream the reply under one typing indicator.
     const reply = await withTyping(client, msg.chat, async () => {
-      // Store the user message's Telegram id too, so /delete can revoke it in the chat.
-      const userRowId = saveMessage(chatId, 'user', text, [msg.id]);
-      if (imagePhoto) {
-        // Vision pass → caption, linked to the user row. It's injected into the window as
-        // a `[<user> sent a photo: …]` block; the chat model sees text, never the pixels.
-        const bytes = await client.downloadAsBuffer(imagePhoto);
-        const caption = await describeImage(Buffer.from(bytes).toString('base64'));
-        saveAttachment(userRowId, 0, caption);
-        log.info(`Image caption: ${caption.slice(0, 120)}`);
-      }
       // Build the cache-friendly window (now including this message + caption) and reply,
       // streaming prose bubbles and running any web_search tool calls before it answers.
       const result = await generateReply(
         systemPrompt,
         persistedSearchStrategy(chatId, userRowId),
         `chat ${chatId}`,
-        streamer,
+        sink,
       );
       // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat, then flush
       // the final bubble (or send the whole thing if nothing streamed, e.g. only a tool call).
       const replyText = finalizeReply(result.content);
-      const ids = await streamer.finalize(replyText);
+      const ids = await sink.finalize(replyText);
       return { replyText, ids, model: result.model };
     });
     // Nothing reached the chat at all — fall through to the error path below.
@@ -200,9 +243,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
     });
   } catch (err) {
     // If some bubbles already streamed before the failure, persist them so memory matches the
-    // chat; only fall back to an apology when the user saw nothing at all.
-    const partialIds = streamer.ids;
-    const partialText = finalizeReply(streamer.streamedText);
+    // chat; only fall back to an apology when the user saw nothing at all (including a
+    // failure — e.g. in the vision pass — before the streamer even existed).
+    const partialIds = streamer?.ids ?? [];
+    const partialText = streamer ? finalizeReply(streamer.streamedText) : '';
     if (partialIds.length > 0 && partialText) {
       log.error('Reply only partially streamed:', err);
       saveMessage(chatId, 'assistant', partialText, partialIds, {
