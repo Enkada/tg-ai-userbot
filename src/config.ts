@@ -104,10 +104,6 @@ export const config = {
    * Unset ⇒ connect directly. The proxy only sees encrypted MTProto, never message contents.
    */
   proxyUrl: process.env.PROXY_URL?.trim() || undefined,
-  character: {
-    /** Name substituted for the {{char}} tag in the system prompt. */
-    name: process.env.CHAR_NAME ?? 'Sara',
-  },
   llm: {
     // ---- System prompt, assembled from three layers (persona + technical + tools) ----
     /**

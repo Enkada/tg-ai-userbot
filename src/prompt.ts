@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { getRecentSummaries } from './memory.js';
 import { getPersona } from './persona.js';
+import { getCharName } from './settings.js';
 import { renderToolsBlock } from './tools.js';
 
 const log = createLogger('prompt');
@@ -78,7 +79,7 @@ export function dayPeriod(hour: number): string {
 /** Substitutes `{{tag}}` placeholders in one layer of text; unknown tags are left untouched. */
 function substitute(text: string, ctx: PromptContext, now: Date): string {
   const vars: Record<string, string> = {
-    char: config.character.name,
+    char: getCharName(),
     user: ctx.userName,
     date: now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
     day: now.toLocaleDateString('en-US', { weekday: 'long' }),

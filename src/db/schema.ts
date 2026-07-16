@@ -198,7 +198,7 @@ export type SummaryRow = typeof summaries.$inferSelect;
  * history is never back-filled — the day the feature is switched on becomes the first summary.
  *
  * `userName` caches the peer's display name (written on every message, independent of the
- * proactive feature) so the off-line summarizer can address {@link config.character} by name
+ * proactive feature) so the off-line summarizer can address the character (see {@link getCharName}) by name
  * in the transcript even when proactivity is disabled.
  */
 export const summaryState = sqliteTable('summary_state', {
@@ -274,3 +274,26 @@ export const personaVersions = sqliteTable('persona_versions', {
 });
 
 export type PersonaVersionRow = typeof personaVersions.$inferSelect;
+
+/**
+ * Global, runtime-mutable settings — a single-row table (always `id` = 1). Unlike the env
+ * vars in {@link config}, these can be changed live from the chat and survive restarts, so
+ * a deploy (which restarts the process) doesn't reset them. Kept as typed columns rather than
+ * a `key/value` bag so each setting stays a real type with its own doc comment, matching the
+ * rest of the schema; future live-tunable knobs join as new columns here.
+ *
+ * The row is seeded once with the column defaults when absent (see {@link initSettings}); from
+ * then on the DB is authoritative.
+ */
+export const settings = sqliteTable('settings', {
+  /** Singleton key — there is exactly one settings row, always id 1. */
+  id: integer('id').primaryKey(),
+  /** The character name substituted for the `{{char}}` tag. Changed via `/name`. */
+  charName: text('char_name').notNull().default('Sara'),
+  /** Epoch ms of the last update. */
+  updatedAt: integer('updated_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type SettingsRow = typeof settings.$inferSelect;

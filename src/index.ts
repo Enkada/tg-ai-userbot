@@ -7,6 +7,7 @@ import { activeProviderId, canCaptionImages, describeImage, initProvider } from 
 import { renderSystemPrompt } from './prompt.js';
 import { runMigrations } from './db/index.js';
 import { initPersona } from './persona.js';
+import { initSettings } from './settings.js';
 import { getLastMessageAt, rememberUserName, saveAttachment, saveMessage } from './memory.js';
 import { photoBeatMs, readDelayMs, readPauseMs, sleep } from './pacing.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
@@ -268,6 +269,8 @@ async function main(): Promise<void> {
   runMigrations();
   // The persona lives in the DB (persona_versions) — load it only after migrations.
   initPersona();
+  // Runtime settings (the {{char}} name, changed via /name) also live in the DB.
+  initSettings();
 
   if (config.proxyUrl) {
     // Log the proxy host without leaking any user:pass credentials in the URL.

@@ -20,6 +20,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
+import { getCharName } from './settings.js';
 import { createLogger } from './logger.js';
 import { summarize } from './providers/openrouter.js';
 import {
@@ -80,7 +81,7 @@ function renderSummaryPrompt(charName: string, userName: string): string {
  * the real names, and asks the dedicated summary model for a first-person diary entry.
  */
 async function summarizeDay(chatId: number, start: number, end: number): Promise<void> {
-  const charName = config.character.name;
+  const charName = getCharName();
   const userName = getSummaryState(chatId)?.userName ?? 'they';
   const msgs = getDayMessages(chatId, start, end);
 

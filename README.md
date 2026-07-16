@@ -21,7 +21,7 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
   occasional near-instant "had the phone in hand" read), and a short silent beat separates
   the read receipt from the typing indicator (for photos, the vision pass runs inside that
   beat). Commands and unsupported message types are still read instantly.
-- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/persona`, `/dump`.
+- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/persona`, `/name`, `/dump`.
 - **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
   and command output lives in a single reusable **panel** message that each command edits
   in place — swept away as soon as you send your next normal message. The bookkeeping is
@@ -44,6 +44,7 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
 | `/context` (`/c`) | Token usage (system prompt + window) vs. the model's max context, plus window re-anchoring state |
 | `/prompt` (`/p`)  | Show the prompt the LLM receives — system prompt + the first 3 and last 3 messages — as a code block |
 | `/persona`        | View or edit the persona layer from chat, no restart: `/persona` shows the raw text (`{{tags}}` intact, ready to copy), `set <text>` replaces it, `undo` swaps with the previous version (run twice to redo — handy for A/B), `default` resets to the shipped default |
+| `/name`           | Show or set the character name (the `{{char}}` tag): `/name` shows it, `/name <name>` changes it live (stored in the DB, survives restarts). Default `Sara` |
 
 Single-letter shorthands: `/s`, `/d`, `/r`, `/u`, `/c`, `/p`. `/reroll` and `/update` rewrite the
 last reply **in place** — they overwrite that one record instead of appending, so memory and
@@ -96,7 +97,7 @@ All layers support `{{tag}}` placeholders that are substituted per message:
 
 | Tag          | Substituted with                                   |
 | ------------ | -------------------------------------------------- |
-| `{{char}}`   | Character name (`CHAR_NAME` in `.env`, default `Sara`) |
+| `{{char}}`   | Character name (default `Sara`; change live with `/name`) |
 | `{{user}}`   | The Telegram user's display name (not username)    |
 | `{{date}}`   | Current date, e.g. `June 10, 2026`                 |
 | `{{day}}`    | Day of week, e.g. `Monday`                         |

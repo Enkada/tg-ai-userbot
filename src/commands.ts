@@ -33,6 +33,7 @@ import {
 import { withReplyCue } from './generate.js';
 import { forgetDebris } from './panel.js';
 import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
+import { getCharName, normalizeCharName, setCharName } from './settings.js';
 import { renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
@@ -673,6 +674,32 @@ register({
       default:
         await reply(PERSONA_HELP);
     }
+  },
+});
+
+register({
+  name: 'name',
+  description: "Show or set the character's name (the {{char}} tag): /name [<name>]",
+  handler: async ({ reply, rawArgs }) => {
+    const raw = rawArgs.trim();
+    // No argument → show the current name and how to change it.
+    if (!raw) {
+      await reply(
+        md(`👤 Character name: **${getCharName()}**\nChange it with \`/name <name>\` — applies to new replies and summaries. Persona text that spells the name out literally (instead of \`{{char}}\`) is unaffected.`),
+      );
+      return;
+    }
+    const name = normalizeCharName(raw);
+    if (!name) {
+      await reply(md('Usage: `/name <name>` — the name must be non-empty.'));
+      return;
+    }
+    const prev = setCharName(name);
+    if (prev === null) {
+      await reply(md(`Name unchanged — already **${name}**.`));
+      return;
+    }
+    await reply(md(`✅ Character name: **${prev}** → **${name}**.`));
   },
 });
 
