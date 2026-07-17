@@ -272,8 +272,13 @@ export const config = {
      * OpenRouter (full context, always reachable), independent of the active chat provider.
      */
     enabled: boolEnv('SUMMARY_ENABLED', false),
-    /** Model slug used only for summaries. Default: the cheapest faithful summarizer we tested. */
-    model: process.env.SUMMARY_MODEL ?? 'google/gemini-2.5-flash-lite',
+    /**
+     * Model slug used only for summaries. Default: won the 2026-07-17 side-by-side against
+     * gemini-2.5-flash-lite — keeps concrete specifics and the diary voice, writes real
+     * follow-ups, and is cheaper per output token; rare truncation is caught by the shape
+     * guard in {@link summarizeDay}.
+     */
+    model: process.env.SUMMARY_MODEL ?? 'deepseek/deepseek-v4-flash',
     /** App-owned summarizer system prompt (first-person diary voice). */
     promptPath: process.env.SUMMARY_PROMPT_PATH ?? 'prompts/summary.txt',
     /** A logical day is only summarized when it holds MORE than this many non-deleted messages. */

@@ -99,6 +99,13 @@ async function summarizeDay(chatId: number, start: number, end: number): Promise
   const user = `Date: ${dateLabel}\n\n<transcript>\n${transcript}\n</transcript>\n\nWrite ${charName}'s diary entry for this day.`;
 
   const content = (await summarize(system, user)).trim();
+  // Shape guard: a valid entry carries all four labeled lines. A response that lost one —
+  // truncation by a flaky upstream, or plain garbage — must throw instead of being stored,
+  // so the scheduler's retry-next-tick path covers bad *output*, not just failed calls.
+  const labels = ['Headline:', 'Happened:', 'Mood:', 'Follow-ups:'];
+  if (!labels.every((l) => content.includes(l))) {
+    throw new Error(`Summary failed the shape check (missing labels): "${content.slice(0, 120)}…"`);
+  }
   saveSummary(chatId, 0, start, end, content);
   log.info(`Summarized chat ${chatId} — ${dateLabel} (${msgs.length} msgs → ${content.length} chars)`);
 }
