@@ -75,8 +75,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   const chatId = msg.chat.id;
   // Display name of the user we're talking to, for the {{user}} prompt tag.
   const userName = msg.sender.displayName;
-  // The user is active: reset the proactive silence timer and cache their name (also for the
-  // off-line summarizer). Covers commands too — any interaction counts as "they're here".
+  // The user just *talked to her*: reset the proactive silence timer and cache their name
+  // (also for the off-line summarizer). Deliberately NOT called for commands — control UI is
+  // not conversation, so peeking at /proactive (or running any command) must never re-arm the
+  // silence timer or wipe the ignored streak.
   const noteActivity = (): void => {
     onUserActivity(chatId, userName);
     rememberUserName(chatId, userName);
@@ -85,9 +87,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   const parsed = photo ? null : parseCommand(text);
 
   if (parsed) {
-    // Commands are control UI, not conversation: read instantly, no human pacing.
+    // Commands are control UI, not conversation: read instantly, no human pacing, and no
+    // proactive-timer reset (see noteActivity above) — only the name cache is refreshed.
     await client.readHistory(msg.chat, { maxId: msg.id });
-    noteActivity();
+    rememberUserName(chatId, userName);
     // Leftover /dump files and command messages stranded by a crash go first, so file
     // output never stacks. The panel itself stays — the handler edits it in place.
     await sweepDebris(client, msg.chat, chatId, ['file', 'command']);

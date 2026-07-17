@@ -13,6 +13,21 @@ function normalizeEmphasis(text: string): string {
 }
 
 /**
+ * User-facing timestamp in 24-hour form — "Jul 17, 19:02", or "Jul 17, 2026, 19:02" with
+ * `year: true`. Every date+time the app displays goes through here so nothing renders AM/PM.
+ */
+export function formatDateTime(ms: number, opts: { year?: boolean } = {}): string {
+  return new Date(ms).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    ...(opts.year ? { year: 'numeric' } : {}),
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+/**
  * Parses the model's output as Markdown (bold, code, links, etc.) into Telegram
  * entities. Falls back to plain text if the Markdown is malformed.
  *

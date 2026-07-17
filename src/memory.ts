@@ -235,6 +235,10 @@ export function upsertProactiveState(chatId: number, patch: ProactivePatch): voi
  * - omitted → leave provenance unchanged.
  * `tgMessageIds`, when given, replaces the stored bubble id(s) — `/reroll` and `/update`
  * revoke the old bubbles and send fresh ones, so the row must point at the new messages.
+ * Repointing also refreshes `createdAt`: fresh bubbles just landed in the chat, so the
+ * read-delay's idle clock ({@link getLastMessageAt}) must see "the chat was active now",
+ * not inherit the replaced reply's age (a reroll after a 2-hour gap otherwise makes the
+ * user's immediate follow-up sit unread as if the chat were still stale).
  */
 export function updateMessageContent(
   id: number,
@@ -247,7 +251,10 @@ export function updateMessageContent(
     source === undefined
       ? { content: clean }
       : { content: clean, provider: source?.provider ?? null, model: source?.model ?? null };
-  if (tgMessageIds !== undefined) patch.tgMessageIds = tgMessageIds;
+  if (tgMessageIds !== undefined) {
+    patch.tgMessageIds = tgMessageIds;
+    patch.createdAt = Date.now();
+  }
   db.update(messages).set(patch).where(eq(messages.id, id)).run();
 }
 
@@ -307,13 +314,33 @@ export function withSearches(content: string, results: SearchEntry[]): string {
   return content ? `${content}\n${blocks}` : blocks;
 }
 
-/** Returns the current context window (oldest → newest) for a chat. */
-export function getWindow(chatId: number): ChatMessage[] {
+/** A window message enriched with provenance, for rich renderings (`/dump`). */
+export interface WindowMessage extends ChatMessage {
+  /** Epoch ms the row was stored (refreshed when `/reroll` or `/update` re-sends the bubbles). */
+  at: number;
+  /** Serving model recorded for an assistant reply, or null (user turns, unknown, human-edited). */
+  model: string | null;
+  /** True for an assistant reply the bot sent unprompted. */
+  proactive: boolean;
+}
+
+/**
+ * The current context window (oldest → newest) with per-message provenance. The `content` is
+ * exactly what {@link getWindow} feeds the LLM; the extra fields are display metadata.
+ */
+export function getWindowDetailed(chatId: number): WindowMessage[] {
   const take = windowSize(messageCount(chatId));
   if (take === 0) return [];
 
   const rows = db
-    .select({ id: messages.id, role: messages.role, content: messages.content })
+    .select({
+      id: messages.id,
+      role: messages.role,
+      content: messages.content,
+      createdAt: messages.createdAt,
+      model: messages.model,
+      proactive: messages.proactive,
+    })
     .from(messages)
     .where(and(eq(messages.chatId, chatId), eq(messages.deleted, false)))
     .orderBy(desc(messages.id))
@@ -353,7 +380,7 @@ export function getWindow(chatId: number): ChatMessage[] {
   }
 
   const userName = chatUserName(chatId);
-  return rows.map(({ id, role, content }) => ({
+  return rows.map(({ id, role, content, createdAt, model, proactive }) => ({
     role,
     // Captions precede the text; search results follow it. Sanitize the composed turn (window-
     // build seam of the cleanup) so legacy rows from before the feature — and the typographic
@@ -364,7 +391,15 @@ export function getWindow(chatId: number): ChatMessage[] {
         searchesByMessage.get(id) ?? [],
       ),
     ),
+    at: createdAt,
+    model: model ?? null,
+    proactive,
   }));
+}
+
+/** Returns the current context window (oldest → newest) for a chat, as the LLM receives it. */
+export function getWindow(chatId: number): ChatMessage[] {
+  return getWindowDetailed(chatId).map(({ role, content }) => ({ role, content }));
 }
 
 export interface WindowInfo {

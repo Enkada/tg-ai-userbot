@@ -1,4 +1,5 @@
 import { html, md, type InputText, type Message, type TelegramClient } from '@mtcute/node';
+import { encode } from 'gpt-tokenizer';
 import { config } from './config.js';
 import {
   activeProviderId,
@@ -26,7 +27,9 @@ import {
   getFacts,
   getLastAssistant,
   getLastRole,
+  getRecentSummaries,
   getWindow,
+  getWindowDetailed,
   getWindowInfo,
   messageCount,
   resetMemory,
@@ -41,7 +44,7 @@ import { withReplyCue } from './generate.js';
 import { forgetDebris } from './panel.js';
 import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
 import { getCharName, normalizeCharName, setCharName } from './settings.js';
-import { renderMarkdown } from './format.js';
+import { formatDateTime, renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
 import { finalizeReply, renderToolsBlock } from './tools.js';
@@ -861,35 +864,98 @@ register({
 
 register({
   name: 'dump',
-  description: 'Send the full prompt (system + conversation) as a .md file',
+  description: 'Send the full annotated prompt (system + conversation) as a .md file',
   handler: async ({ replyDocument, chatId, userName }) => {
-    const systemPrompt = renderSystemPrompt({ userName, chatId });
-    const conversation = getWindow(chatId);
+    const ctx = { userName, chatId };
+    const n = (x: number): string => x.toLocaleString('en-US');
+    // GPT-tokenizer estimate, same proxy the OpenRouter provider uses for /context.
+    const tok = (s: string): number => (s ? encode(s).length : 0);
+    const charName = getCharName();
+
+    // The same pieces renderSystemPrompt joins, in its exact order — the annotated dump must
+    // never drift from the live payload. Empty blocks stay in the overview (a zero row says
+    // "nothing here yet") but get no body section.
+    const nFacts = factCount(chatId);
+    const nSummaries = getRecentSummaries(chatId, config.summary.maxKept).length;
+    const sections = [
+      { emoji: '🎭', name: 'Persona', body: renderPersona(ctx) },
+      { emoji: '⚙️', name: 'Technical', body: renderTechnical(ctx) },
+      { emoji: '📇', name: `Facts (${nFacts})`, body: renderFactsBlock(chatId, userName) },
+      { emoji: '🧠', name: `Memory (${nSummaries} day${nSummaries === 1 ? '' : 's'})`, body: renderMemoryBlock(chatId, userName) },
+      { emoji: '🛠️', name: 'Tools', body: renderToolsBlock() },
+    ];
+    const msgs = getWindowDetailed(chatId);
+    const info = getWindowInfo(chatId);
+
+    const systemTokens = tok(sections.map((s) => s.body).filter(Boolean).join('\n\n')) + 4;
+    const convTokens = msgs.reduce((sum, m) => sum + tok(m.content) + 4, 0);
+    const total = systemTokens + convTokens;
+
+    // The model's max context is a provider call — best-effort, omitted when unreachable.
+    let budget = '';
+    try {
+      const max = await getMaxContext();
+      if (max) budget = ` of **${n(max)}** (${((total / max) * 100).toFixed(1)}%)`;
+    } catch {
+      /* provider unreachable — show the estimate alone */
+    }
+
+    const share = (t: number): string => (total > 0 ? `${((t / total) * 100).toFixed(1)}%` : '—');
+    const table = [
+      '| Section | ≈ Tokens | Share |',
+      '|:--|--:|--:|',
+      ...sections.map((s) => `| ${s.emoji} ${s.name} | ${n(tok(s.body))} | ${share(tok(s.body))} |`),
+      `| 💬 Conversation (${msgs.length}) | ${n(convTokens)} | ${share(convTokens)} |`,
+      `| **Total** | **${n(total)}** | 100% |`,
+    ].join('\n');
 
     // Verbatim fidelity: each section's raw text goes inside a fenced block (see mdFence) so
     // the .md reader shows exactly what the model receives (the prompt's own `#` headings
-    // don't become reader headings).
-    const convText = conversation.length
-      ? conversation.map((m) => `[${ROLE_LABELS[m.role]}]\n${m.content}`).join('\n\n')
-      : '(no conversation yet)';
+    // don't become reader headings) — only the annotations around the fences are ours.
+    const sectionDocs = sections
+      .filter((s) => s.body)
+      .map((s) => `## ${s.emoji} ${s.name} — ≈${n(tok(s.body))} tokens\n\n${mdFence(s.body)}`);
+
+    // One block per turn: who spoke, when (24h), and — for replies — which model, so a scroll
+    // through the dump doubles as a provenance log. Content stays fenced, exactly as the LLM
+    // sees it (captions and search blocks included).
+    const convHeader =
+      `## 💬 Conversation — ${msgs.length} message${msgs.length === 1 ? '' : 's'}` +
+      (info.total > msgs.length
+        ? ` (of ${info.total} stored · window re-anchors in ${info.untilReanchor})`
+        : '');
+    const convDoc = msgs.length
+      ? msgs
+          .map((m, i) => {
+            const who = m.role === 'user' ? `🧑 ${userName}` : `🤖 ${charName}`;
+            const meta = [
+              formatDateTime(m.at),
+              m.model ? `\`${m.model}\`` : null,
+              m.proactive ? '🛎️ proactive' : null,
+            ]
+              .filter(Boolean)
+              .join(' · ');
+            return `**#${i + 1} · ${who}** — ${meta}\n\n${mdFence(m.content)}`;
+          })
+          .join('\n\n')
+      : '_(no conversation yet)_';
 
     const now = new Date();
-    const heading = now.toLocaleString('en-US', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
-
     const doc =
-      `# Prompt dump — ${heading}\n\n` +
-      `## System prompt\n\n${mdFence(systemPrompt)}\n\n` +
-      `## Conversation — ${conversation.length} message${conversation.length === 1 ? '' : 's'}\n\n` +
-      mdFence(convText) +
-      '\n';
+      [
+        `# 📄 Prompt dump — ${formatDateTime(now.getTime(), { year: true })}`,
+        `**Character:** ${charName} · **User:** ${userName} · **Provider:** \`${activeProviderId()}\``,
+        `**Payload:** ≈**${n(total)}** tokens${budget} — system ${n(systemTokens)} + conversation ${n(convTokens)}`,
+        `_Token counts are GPT-tokenizer estimates (+4 per message for role overhead). Sections appear in the exact order the model receives them; every fenced block is verbatim._`,
+        `## 📊 Overview\n\n${table}`,
+        ...sectionDocs,
+        `${convHeader}\n\n${convDoc}`,
+      ].join('\n\n') + '\n';
 
     await replyDocument(
       Buffer.from(doc, 'utf8'),
       `prompt_${fileStamp(now)}.md`,
-      md(`📄 Full prompt — system + ${conversation.length} message${conversation.length === 1 ? '' : 's'}`),
+      md(`📄 Prompt dump — ≈${n(total)} tokens · ${msgs.length} message${msgs.length === 1 ? '' : 's'} in window`),
     );
   },
 });

@@ -35,6 +35,7 @@ import {
   upsertProactiveState,
 } from './memory.js';
 import { finalizeReply } from './tools.js';
+import { formatDateTime } from './format.js';
 import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
 
@@ -287,15 +288,13 @@ export function getProactiveStatus(chatId: number): string {
 
   const state = getProactiveState(chatId);
   const ignored = state?.ignoredCount ?? 0;
-  const fmt = (ms: number): string =>
-    new Date(ms).toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
 
   const due =
     ignored >= p.maxIgnored
       ? `blocked — ${ignored}/${p.maxIgnored} ignored (waiting for your reply)`
       : state?.dueAt == null
         ? 'unarmed (re-arms at morning)'
-        : `${fmt(state.dueAt)}${state.isMorning ? ' (morning)' : ''}`;
+        : `${formatDateTime(state.dueAt)}${state.isMorning ? ' (morning)' : ''}`;
 
   return [
     `Window: **${p.windowStartHour}:00–${p.windowEndHour}:00** · tick **${Math.round(p.tickMs / 1000)}s**`,
