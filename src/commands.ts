@@ -11,13 +11,19 @@ import {
   type ChatResult,
 } from './llm.js';
 import {
+  renderFactsBlock,
   renderMemoryBlock,
   renderPersona,
   renderSystemPrompt,
   renderTechnical,
 } from './prompt.js';
 import {
+  addFact,
+  deleteFact,
   deleteLastMessages,
+  editFact,
+  factCount,
+  getFacts,
   getLastAssistant,
   getLastRole,
   getWindow,
@@ -30,6 +36,7 @@ import {
   MIN_WINDOW,
   STEP,
 } from './memory.js';
+import { FACT_CATEGORIES, type FactCategory } from './db/schema.js';
 import { withReplyCue } from './generate.js';
 import { forgetDebris } from './panel.js';
 import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
@@ -301,8 +308,9 @@ register({
     const total = messageCount(chatId);
     if (total > NUKE_CONFIRM_THRESHOLD && args[0]?.toLowerCase() !== 'confirm') {
       const nSummaries = summaryCount(chatId);
+      const nFacts = factCount(chatId);
       await reply(
-        md(`☢️ **Nuke** — erases this chat for both sides and wipes memory: **${total}** message${total === 1 ? '' : 's'}, **${nSummaries}** summar${nSummaries === 1 ? 'y' : 'ies'}. Cannot be undone.
+        md(`☢️ **Nuke** — erases this chat for both sides and wipes memory: **${total}** message${total === 1 ? '' : 's'}, **${nSummaries}** summar${nSummaries === 1 ? 'y' : 'ies'}, **${nFacts}** fact${nFacts === 1 ? '' : 's'}. Cannot be undone.
 Send \`/nuke confirm\` to proceed.`),
       );
       return;
@@ -502,7 +510,7 @@ ${source}`),
 });
 
 /** The slices of the LLM prompt that `/prompt` can show, one at a time. */
-type PromptPart = 'persona' | 'technical' | 'tools' | 'summaries' | 'chat';
+type PromptPart = 'persona' | 'technical' | 'tools' | 'summaries' | 'facts' | 'chat';
 
 /** Maps the argument the user types to a part. `/prompt` with no arg defaults to `persona`. */
 const PROMPT_PART_ALIASES: Record<string, PromptPart> = {
@@ -515,6 +523,9 @@ const PROMPT_PART_ALIASES: Record<string, PromptPart> = {
   s: 'summaries',
   summary: 'summaries',
   summaries: 'summaries',
+  f: 'facts',
+  fact: 'facts',
+  facts: 'facts',
   c: 'chat',
   chat: 'chat',
   history: 'chat',
@@ -527,6 +538,7 @@ const PROMPT_HELP = md(`**🧩 /prompt** \`<part>\` — show one slice of the pr
 \`tech\` — technical layer
 \`t\` — tools block
 \`s\` — summaries (memory)
+\`f\` — facts block as a .md file (as the model sees it — use \`/facts\` to edit)
 \`c\` — chat window (first 3 + last 6)
 \`h\` — this help
 
@@ -561,8 +573,8 @@ function renderChatPeek(conversation: ChatMessage[]): string {
 register({
   name: 'prompt',
   aliases: ['p'],
-  description: 'Show one slice of the LLM prompt: /p [p|tech|t|s|c|h] (default persona)',
-  handler: async ({ reply, chatId, userName, args }) => {
+  description: 'Show one slice of the LLM prompt: /p [p|tech|t|s|f|c|h] (default persona)',
+  handler: async ({ reply, replyDocument, chatId, userName, args }) => {
     const arg = args[0]?.toLowerCase();
     if (arg === 'h' || arg === 'help') {
       await reply(PROMPT_HELP);
@@ -572,6 +584,22 @@ register({
     const part = arg === undefined ? 'persona' : PROMPT_PART_ALIASES[arg];
     if (!part) {
       await reply(PROMPT_HELP);
+      return;
+    }
+
+    // The facts block outgrew the 4096-char panel, so it ships as a verbatim .md file
+    // (fenced, like /dump) with the same last-touched caption as /facts.
+    if (part === 'facts') {
+      const block = renderFactsBlock(chatId, userName);
+      if (!block) {
+        await reply(html`<pre>[Facts]\n(no facts yet)</pre>`);
+        return;
+      }
+      await replyDocument(
+        Buffer.from(`# Facts block — as the model sees it\n\n${mdFence(block)}\n`, 'utf8'),
+        `prompt_facts_${fileStamp()}.md`,
+        factsCaption(chatId, '🧩 Facts block — as the model sees it'),
+      );
       return;
     }
 
@@ -703,6 +731,134 @@ register({
   },
 });
 
+/**
+ * Wraps raw text in a fenced block sized longer than any backtick run inside, so content
+ * that itself contains ``` can't break out — the .md reader shows it verbatim.
+ */
+function mdFence(content: string): string {
+  const longest = Math.max(0, ...[...content.matchAll(/`+/g)].map((m) => m[0].length));
+  const ticks = '`'.repeat(Math.max(3, longest + 1));
+  return `${ticks}\n${content}\n${ticks}`;
+}
+
+/** `2026_07_17_1930`-style timestamp for generated file names. */
+function fileStamp(now = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${now.getFullYear()}_${pad(now.getMonth() + 1)}_${pad(now.getDate())}_` +
+    `${pad(now.getHours())}${pad(now.getMinutes())}`
+  );
+}
+
+/** The `/facts` help: the action menu, plus how it relates to `/prompt f`. */
+const FACTS_HELP = md(`**📇 /facts** \`/f\` — long-term facts about you (edited by the nightly pass)
+\`/f\` — all facts with ids, as a .md file
+\`/f add <category> <text>\` — record a fact by hand
+\`/f set <id> <category> <text>\` — rewrite a fact
+\`/f delete <id>\` — remove a fact
+
+Categories: ${FACT_CATEGORIES.map((c) => `\`${c}\``).join(' ')}
+\`/prompt f\` shows the block exactly as the model sees it (no ids).`);
+
+/**
+ * Caption for the facts file messages: the last 10 added/updated facts, newest first —
+ * the "what changed lately" view, since the file itself is ordered by category. Each
+ * line and the whole caption are clipped to stay under Telegram's 1024-char caption cap.
+ */
+function factsCaption(chatId: number, heading: string): string {
+  const rows = [...getFacts(chatId)].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 10);
+  const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+  const lines = rows.map((f) => clip(`#${f.id} ${f.content}`, 90));
+  return clip(`${heading}\nLast touched:\n${lines.join('\n')}`, 1000);
+}
+
+/** The full fact list as a Markdown document: grouped by category, with ids and dates. */
+function buildFactsDoc(chatId: number): string {
+  const rows = getFacts(chatId);
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const sections = FACT_CATEGORIES.map((cat) => {
+    const items = rows.filter((f) => f.category === cat);
+    if (items.length === 0) return null;
+    const lines = items.map((f) => {
+      const dates = day(f.createdAt) + (f.updatedAt !== f.createdAt ? ` → ${day(f.updatedAt)}` : '');
+      return `- **#${f.id}** (${dates}) ${f.content}`;
+    });
+    return `## ${cat} (${items.length})\n\n${lines.join('\n')}`;
+  }).filter(Boolean);
+  return `# Facts — ${rows.length}\n\n${sections.join('\n\n')}\n`;
+}
+
+register({
+  name: 'facts',
+  aliases: ['f'],
+  description: 'Long-term facts as a .md file; /f [add|set|delete] to edit',
+  handler: async ({ reply, replyDocument, chatId, args, rawArgs }) => {
+    const action = args[0]?.toLowerCase();
+
+    // No args → the full listing as a file (the list outgrew the 4096-char panel), captioned
+    // with the 10 most recently touched facts. Tracked as `file` debris like /dump's output.
+    if (action === undefined) {
+      const total = factCount(chatId);
+      if (total === 0) {
+        await reply(md('📇 No facts yet — the nightly pass records them, or `/f add <category> <text>`.'));
+        return;
+      }
+      await replyDocument(
+        Buffer.from(buildFactsDoc(chatId), 'utf8'),
+        `facts_${fileStamp()}.md`,
+        factsCaption(chatId, `📇 ${total} fact${total === 1 ? '' : 's'}`),
+      );
+      return;
+    }
+
+    if (action === 'add') {
+      const m = rawArgs.match(/^add\s+(\S+)\s+([\s\S]+)$/i);
+      const category = m?.[1].toLowerCase() as FactCategory | undefined;
+      if (!m || !category || !FACT_CATEGORIES.includes(category)) {
+        await reply(FACTS_HELP);
+        return;
+      }
+      const content = m[2].trim();
+      const id = addFact(chatId, category, content);
+      await reply(md(`✅ Added fact #${id} [${category}]:\n${content}`));
+      return;
+    }
+
+    if (action === 'set') {
+      const m = rawArgs.match(/^set\s+(\d+)\s+(\S+)\s+([\s\S]+)$/i);
+      const category = m?.[2].toLowerCase() as FactCategory | undefined;
+      if (!m || !category || !FACT_CATEGORIES.includes(category)) {
+        await reply(FACTS_HELP);
+        return;
+      }
+      const id = Number(m[1]);
+      const content = m[3].trim();
+      if (!editFact(chatId, id, content, category)) {
+        await reply(md(`⚠️ No fact #${id} here.`));
+        return;
+      }
+      await reply(md(`✅ Fact #${id} [${category}] updated:\n${content}`));
+      return;
+    }
+
+    if (action === 'delete' || action === 'del') {
+      const id = Number(args[1]);
+      if (!Number.isInteger(id)) {
+        await reply(FACTS_HELP);
+        return;
+      }
+      if (!deleteFact(chatId, id)) {
+        await reply(md(`⚠️ No fact #${id} here.`));
+        return;
+      }
+      await reply(md(`🗑 Fact #${id} deleted.`));
+      return;
+    }
+
+    await reply(FACTS_HELP);
+  },
+});
+
 register({
   name: 'dump',
   description: 'Send the full prompt (system + conversation) as a .md file',
@@ -710,25 +866,14 @@ register({
     const systemPrompt = renderSystemPrompt({ userName, chatId });
     const conversation = getWindow(chatId);
 
-    // Verbatim fidelity: each section's raw text goes inside a fenced block so the .md reader
-    // shows exactly what the model receives (the prompt's own `#` headings don't become reader
-    // headings). The fence is sized longer than any backtick run inside, so content that itself
-    // contains ``` can't break out of the block.
-    const fence = (content: string): string => {
-      const longest = Math.max(0, ...[...content.matchAll(/`+/g)].map((m) => m[0].length));
-      const ticks = '`'.repeat(Math.max(3, longest + 1));
-      return `${ticks}\n${content}\n${ticks}`;
-    };
-
+    // Verbatim fidelity: each section's raw text goes inside a fenced block (see mdFence) so
+    // the .md reader shows exactly what the model receives (the prompt's own `#` headings
+    // don't become reader headings).
     const convText = conversation.length
       ? conversation.map((m) => `[${ROLE_LABELS[m.role]}]\n${m.content}`).join('\n\n')
       : '(no conversation yet)';
 
     const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const stamp =
-      `${now.getFullYear()}_${pad(now.getMonth() + 1)}_${pad(now.getDate())}_` +
-      `${pad(now.getHours())}${pad(now.getMinutes())}`;
     const heading = now.toLocaleString('en-US', {
       dateStyle: 'medium',
       timeStyle: 'short',
@@ -736,14 +881,14 @@ register({
 
     const doc =
       `# Prompt dump — ${heading}\n\n` +
-      `## System prompt\n\n${fence(systemPrompt)}\n\n` +
+      `## System prompt\n\n${mdFence(systemPrompt)}\n\n` +
       `## Conversation — ${conversation.length} message${conversation.length === 1 ? '' : 's'}\n\n` +
-      fence(convText) +
+      mdFence(convText) +
       '\n';
 
     await replyDocument(
       Buffer.from(doc, 'utf8'),
-      `prompt_${stamp}.md`,
+      `prompt_${fileStamp(now)}.md`,
       md(`📄 Full prompt — system + ${conversation.length} message${conversation.length === 1 ? '' : 's'}`),
     );
   },

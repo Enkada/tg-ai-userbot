@@ -1,7 +1,16 @@
 import { and, asc, count, desc, eq, gte, inArray, lt } from 'drizzle-orm';
 import { db } from './db/index.js';
-import { attachments, messages, proactiveState, searches, summaries, summaryState } from './db/schema.js';
-import type { ProactiveStateRow, SummaryStateRow } from './db/schema.js';
+import {
+  attachments,
+  facts,
+  factsState,
+  messages,
+  proactiveState,
+  searches,
+  summaries,
+  summaryState,
+} from './db/schema.js';
+import type { FactCategory, FactRow, FactsStateRow, ProactiveStateRow, SummaryStateRow } from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
 import { sanitize } from './sanitize.js';
@@ -413,15 +422,26 @@ export function deleteLastMessages(chatId: number, n: number): DeleteResult {
 
 // ---- Long-term memory: per-day summaries ------------------------------------------------
 
+/** A day-transcript turn: a window-shaped message plus its timestamp (for `[HH:MM]` labels). */
+export interface DayMessage extends ChatMessage {
+  /** Epoch ms the message was stored. */
+  at: number;
+}
+
 /**
  * All non-deleted messages of a chat in the logical-day range `[start, end)` (oldest → newest),
  * with image captions and web-search results rendered inline exactly as in {@link getWindow}.
  * Unlike `getWindow` this is uncapped — a whole day, however long — because it feeds the
- * summarizer, not the live context window.
+ * offline day readers (summarizer, facts diff pass), not the live context window.
  */
-export function getDayMessages(chatId: number, start: number, end: number): ChatMessage[] {
+export function getDayMessages(chatId: number, start: number, end: number): DayMessage[] {
   const rows = db
-    .select({ id: messages.id, role: messages.role, content: messages.content })
+    .select({
+      id: messages.id,
+      role: messages.role,
+      content: messages.content,
+      createdAt: messages.createdAt,
+    })
     .from(messages)
     .where(
       and(
@@ -463,9 +483,10 @@ export function getDayMessages(chatId: number, start: number, end: number): Chat
   }
 
   const userName = chatUserName(chatId);
-  return rows.map(({ id, role, content }) => ({
+  return rows.map(({ id, role, content, createdAt }) => ({
     role,
-    // Same window-build cleanup as getWindow: hand the summarizer plain-keyboard text.
+    at: createdAt,
+    // Same window-build cleanup as getWindow: hand the day readers plain-keyboard text.
     content: sanitize(
       withSearches(
         withCaptions(content, captionsByMessage.get(id) ?? [], userName),
@@ -583,9 +604,9 @@ export function summaryCount(chatId: number): number {
 }
 
 /**
- * Soft-deletes all messages for a chat (sets `deleted`), and the chat's summaries with them —
- * /nuke wipes recalled long-term memory too, not just the live window. Returns how many
- * message rows were flagged.
+ * Soft-deletes all messages for a chat (sets `deleted`), and the chat's summaries and facts
+ * with them — /nuke wipes recalled long-term memory too, not just the live window. Returns
+ * how many message rows were flagged.
  */
 export function resetMemory(chatId: number): number {
   const res = db
@@ -597,5 +618,89 @@ export function resetMemory(chatId: number): number {
     .set({ deleted: true })
     .where(and(eq(summaries.chatId, chatId), eq(summaries.deleted, false)))
     .run();
+  db.update(facts)
+    .set({ deleted: true })
+    .where(and(eq(facts.chatId, chatId), eq(facts.deleted, false)))
+    .run();
   return res.changes;
+}
+
+// ---- Long-term memory: durable facts ----------------------------------------------------
+
+/**
+ * All non-deleted facts for a chat, oldest first (stable ids and a stable display order,
+ * so the rendered fact list only changes when a fact actually changes). Feeds the system
+ * prompt block, the diff pass's input list, and /facts alike.
+ */
+export function getFacts(chatId: number): FactRow[] {
+  return db
+    .select()
+    .from(facts)
+    .where(and(eq(facts.chatId, chatId), eq(facts.deleted, false)))
+    .orderBy(asc(facts.id))
+    .all();
+}
+
+/** Inserts one fact. Returns the new row's id. */
+export function addFact(chatId: number, category: FactCategory, content: string): number {
+  const row = db
+    .insert(facts)
+    .values({ chatId, category, content })
+    .returning({ id: facts.id })
+    .get();
+  return row.id;
+}
+
+/**
+ * Replaces a fact's content (and optionally its category), stamping `updatedAt`. Returns
+ * false when the id doesn't exist, is soft-deleted, or belongs to another chat — the caller
+ * treats that as "fact not found" rather than trusting the id blindly (diff-pass ids come
+ * from a model).
+ */
+export function editFact(
+  chatId: number,
+  id: number,
+  content: string,
+  category?: FactCategory,
+): boolean {
+  const res = db
+    .update(facts)
+    .set({ content, ...(category ? { category } : {}), updatedAt: Date.now() })
+    .where(and(eq(facts.id, id), eq(facts.chatId, chatId), eq(facts.deleted, false)))
+    .run();
+  return res.changes > 0;
+}
+
+/** Soft-deletes one fact. Returns false when there's no live fact with that id in this chat. */
+export function deleteFact(chatId: number, id: number): boolean {
+  const res = db
+    .update(facts)
+    .set({ deleted: true, updatedAt: Date.now() })
+    .where(and(eq(facts.id, id), eq(facts.chatId, chatId), eq(facts.deleted, false)))
+    .run();
+  return res.changes > 0;
+}
+
+/** Count of non-deleted facts for a chat. Feeds /nuke's confirmation line. */
+export function factCount(chatId: number): number {
+  const row = db
+    .select({ c: count() })
+    .from(facts)
+    .where(and(eq(facts.chatId, chatId), eq(facts.deleted, false)))
+    .get();
+  return row?.c ?? 0;
+}
+
+/** Current facts-scheduler state for a chat, or null if none has been recorded yet. */
+export function getFactsState(chatId: number): FactsStateRow | null {
+  return db.select().from(factsState).where(eq(factsState.chatId, chatId)).limit(1).get() ?? null;
+}
+
+/** Advances the facts-scheduler cursor (`lastDoneStart`) for a chat. */
+export function setFactsCursor(chatId: number, lastDoneStart: number): void {
+  const now = Date.now();
+  db.insert(factsState)
+    .values({ chatId, lastDoneStart, updatedAt: now })
+    .onConflictDoUpdate({ target: factsState.chatId, set: { lastDoneStart, updatedAt: now } })
+    .run();
 }

@@ -55,14 +55,14 @@ export function dayStart(ms: number): number {
 }
 
 /** Start of the logical day after the one beginning at `start` (DST-safe +1 day). */
-function nextDayStart(start: number): number {
+export function nextDayStart(start: number): number {
   const d = new Date(start);
   d.setDate(d.getDate() + 1);
   return d.getTime();
 }
 
 /** Start of the logical day before the one beginning at `start` (DST-safe −1 day). */
-function prevDayStart(start: number): number {
+export function prevDayStart(start: number): number {
   const d = new Date(start);
   d.setDate(d.getDate() - 1);
   return d.getTime();

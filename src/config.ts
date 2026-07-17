@@ -294,6 +294,36 @@ export const config = {
     /** Per-request timeout (ms). */
     timeoutMs: numberEnv('SUMMARY_TIMEOUT_MS', 60_000),
   },
+  // ---- Long-term memory: durable facts about the user (nightly diff pass) ----
+  facts: {
+    /**
+     * Master switch. Like summaries, requires `OPENROUTER_API_KEY` — the diff pass always
+     * runs through OpenRouter regardless of the active chat provider.
+     */
+    enabled: boolEnv('FACTS_ENABLED', false),
+    /**
+     * Model slug for the diff pass. Default: the most disciplined merger in testing
+     * (2026-07-17) — flash-lite invented op ids and churned; gemini-2.5-flash decorated
+     * facts with one-day ephemera. Run with reasoning off.
+     */
+    model: process.env.FACTS_MODEL ?? 'deepseek/deepseek-v4-flash',
+    /** App-owned diff-pass system prompt (extract+merge rules and the JSON op format). */
+    promptPath: process.env.FACTS_PROMPT_PATH ?? 'prompts/facts.txt',
+    /**
+     * A logical day is scanned when it holds MORE than this many non-deleted messages.
+     * Deliberately lower than the summary threshold — a three-message day can still carry
+     * "btw, I got the job", and a scan of a fact-free day just returns empty ops.
+     */
+    minMessages: numberEnv('FACTS_MIN_MESSAGES', 3),
+    /** How often the scheduler checks for a completed, unscanned day (ms). Default 10 min. */
+    tickMs: numberEnv('FACTS_TICK_MS', 600_000),
+    /** Low — the diff pass should be faithful, not creative. */
+    temperature: numberEnv('FACTS_TEMPERATURE', 0.3),
+    /** Cap on the ops JSON. Generous: a dense first day produced ~600 tokens in testing. */
+    maxTokens: numberEnv('FACTS_MAX_TOKENS', 2000),
+    /** Per-request timeout (ms). Upstreams for this model ranged 1.5–40s in testing. */
+    timeoutMs: numberEnv('FACTS_TIMEOUT_MS', 90_000),
+  },
 } as const;
 
 if (!Number.isInteger(config.apiId)) {

@@ -283,6 +283,33 @@ export async function summarize(systemPrompt: string, transcript: string): Promi
   return content;
 }
 
+/**
+ * One-shot facts diff-pass call, used by the long-term-facts scheduler (facts.ts). Same
+ * shape and rationale as {@link summarize}: dedicated model ({@link config.facts.model}),
+ * non-streaming, no tools, no chat {@link PROVIDER_ROUTING}, reasoning off (essential here —
+ * with reasoning on, some upstreams burn the whole token budget on hidden chain-of-thought
+ * and return empty content). Throws if OpenRouter isn't configured or the call fails.
+ */
+export async function factsPass(systemPrompt: string, userMessage: string): Promise<string> {
+  if (!cfg.apiKey) throw new Error('Facts pass requires OpenRouter (OPENROUTER_API_KEY is missing)');
+  const { content } = await openaiChatCompletionStream({
+    url: CHAT_URL,
+    headers: authHeaders(),
+    model: config.facts.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userMessage },
+    ],
+    temperature: config.facts.temperature,
+    maxTokens: config.facts.maxTokens,
+    timeoutMs: config.facts.timeoutMs,
+    extraBody: { reasoning: { enabled: false } },
+    label: 'Facts',
+    dispatcher,
+  });
+  return content;
+}
+
 /** The active upstream routing preference, as configured. */
 export interface RoutingInfo {
   order: string[];

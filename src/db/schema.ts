@@ -275,6 +275,77 @@ export const personaVersions = sqliteTable('persona_versions', {
 
 export type PersonaVersionRow = typeof personaVersions.$inferSelect;
 
+/** The fixed fact-category vocabulary (see prompts/facts.txt). Shared by schema, prompt, and /facts. */
+export const FACT_CATEGORIES = [
+  'work',
+  'home',
+  'people',
+  'health',
+  'likes',
+  'backstory',
+  'us',
+  'other',
+] as const;
+
+export type FactCategory = (typeof FACT_CATEGORIES)[number];
+
+/**
+ * Long-term memory, tier three: durable facts about the user (semantic memory — who he *is*),
+ * beside the rolling window (verbatim recent turns) and {@link summaries} (episodic diary).
+ * Rows are written almost exclusively by the nightly facts diff pass (see facts.ts), which
+ * extracts add/edit/delete operations from each completed logical day; `/facts` allows manual
+ * curation of the same rows. All non-deleted facts are injected into the system prompt,
+ * grouped by category — there is no retrieval step at this scale.
+ *
+ * Soft-deleted like {@link messages}: the diff pass's delete op and `/facts delete` flag rows,
+ * and `/nuke` wipes the lot, so nuking really does make her forget everything.
+ */
+export const facts = sqliteTable(
+  'facts',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Telegram chat (peer) id — same key as {@link messages.chatId}. */
+    chatId: integer('chat_id').notNull(),
+    /** Grouping bucket for display; fixed vocabulary so categories can't drift. */
+    category: text('category', { enum: FACT_CATEGORIES }).notNull(),
+    /** The fact: one short, self-contained third-person sentence about the user. */
+    content: text('content').notNull(),
+    /** Soft-delete flag. Set by the diff pass's delete op, /facts delete, and /nuke. */
+    deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
+    /** Epoch ms the fact was first recorded ("learned" date shown to the diff pass). */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    /** Epoch ms of the last edit (diff-pass edit op or /facts set). */
+    updatedAt: integer('updated_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_facts_chat').on(t.chatId, t.deleted, t.category)],
+);
+
+export type FactRow = typeof facts.$inferSelect;
+
+/**
+ * Per-chat cursor for the facts scheduler — the exact shape of {@link summaryState}'s
+ * `lastDoneStart`, kept in its own table so the two nightly jobs advance and retry
+ * independently (a failed facts pass must not stall summaries, and vice versa).
+ * NULL/absent means "not activated": the first tick stamps the previous day, so history
+ * from before the feature existed is never back-filled.
+ */
+export const factsState = sqliteTable('facts_state', {
+  /** Telegram chat (peer) id. */
+  chatId: integer('chat_id').primaryKey(),
+  /** Cursor: epoch-ms start of the last logical day processed. NULL until first activation. */
+  lastDoneStart: integer('last_done_start'),
+  /** Epoch ms of the last update. */
+  updatedAt: integer('updated_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type FactsStateRow = typeof factsState.$inferSelect;
+
 /**
  * Global, runtime-mutable settings — a single-row table (always `id` = 1). Unlike the env
  * vars in {@link config}, these can be changed live from the chat and survive restarts, so

@@ -17,6 +17,7 @@ import { withTyping } from './typing.js';
 import { enqueue } from './queue.js';
 import { onUserActivity, startProactiveLoop } from './proactive.js';
 import { startSummaryLoop } from './summary.js';
+import { startFactsLoop } from './facts.js';
 
 const log = createLogger('bot');
 const startedAt = Date.now();
@@ -296,6 +297,9 @@ async function main(): Promise<void> {
 
   // Start the long-term-memory summarizer (no-op unless SUMMARY_ENABLED=true + OpenRouter set).
   startSummaryLoop();
+
+  // Start the long-term-facts diff pass (no-op unless FACTS_ENABLED=true + OpenRouter set).
+  startFactsLoop();
 
   log.info('UserBot is online and listening for messages.');
 }

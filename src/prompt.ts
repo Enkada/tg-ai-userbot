@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
+import { FACT_CATEGORIES } from './db/schema.js';
 import { createLogger } from './logger.js';
-import { getRecentSummaries } from './memory.js';
+import { getFacts, getRecentSummaries } from './memory.js';
 import { getPersona } from './persona.js';
 import { getCharName } from './settings.js';
 import { renderToolsBlock } from './tools.js';
@@ -49,6 +50,31 @@ export function renderMemoryBlock(chatId: number, userName: string): string {
     `These are your own diary notes from earlier days with ${userName}, oldest first. ` +
     `Recall them naturally as your own memories — never quote them, list them, or mention having notes.\n\n` +
     body
+  );
+}
+
+/**
+ * Builds the `# About {user}` block: every non-deleted fact for the chat, grouped under
+ * capitalized category headers in the fixed {@link FACT_CATEGORIES} order (no ids, no dates —
+ * `/facts` shows those; the model sees knowledge, not records). The framing line plays the
+ * same role as the memory block's: this is background the character *carries*, to surface
+ * only when relevant — without it she works her way through the list unprompted.
+ * Returns '' when the chat has no facts yet.
+ */
+export function renderFactsBlock(chatId: number, userName: string): string {
+  const rows = getFacts(chatId);
+  if (rows.length === 0) return '';
+  const groups = FACT_CATEGORIES.map((cat) => {
+    const items = rows.filter((f) => f.category === cat);
+    if (items.length === 0) return null;
+    const header = cat === 'us' ? 'Us' : cat[0].toUpperCase() + cat.slice(1);
+    return `${header}:\n${items.map((f) => `- ${f.content}`).join('\n')}`;
+  }).filter(Boolean);
+  return (
+    `# About ${userName}\n` +
+    `Things you know about ${userName} from your time together — background knowledge you simply carry. ` +
+    `Let it inform you naturally when it's relevant; never recite it, list it, or bring these up unprompted.\n\n` +
+    groups.join('\n\n')
   );
 }
 
@@ -107,13 +133,17 @@ export function renderSystemPrompt(
 ): string {
   const { now = new Date(), includeMemory = true } = opts;
 
-  // Persona + technical → memory (recollections) → tools (capabilities/protocol). Both the memory
-  // and tools blocks are conditional and rendered per message, so /prompt and /context reflect the
-  // exact prompt the LLM sees. The order here is the single source of truth for the live payload,
-  // /prompt, and /dump alike — keep it in sync with renderToolsBlock's placement.
+  // Persona + technical → facts (who the user is) → memory (recollections) → tools
+  // (capabilities/protocol). The facts and memory blocks are rendered per message, so /prompt
+  // and /context reflect the exact prompt the LLM sees. Unlike the memory block, facts are NOT
+  // dropped for proactive openers: they're timeless background rather than salient events, so
+  // the opener-fixation problem that exiled summaries doesn't apply (kept under watch). The
+  // order here is the single source of truth for the live payload, /prompt, and /dump alike —
+  // keep it in sync with renderToolsBlock's placement.
+  const factsBlock = renderFactsBlock(ctx.chatId, ctx.userName);
   const memory = includeMemory ? renderMemoryBlock(ctx.chatId, ctx.userName) : '';
   const tools = renderToolsBlock();
-  return [renderPersona(ctx, { now }), renderTechnical(ctx, { now }), memory, tools]
+  return [renderPersona(ctx, { now }), renderTechnical(ctx, { now }), factsBlock, memory, tools]
     .filter(Boolean)
     .join('\n\n');
 }
