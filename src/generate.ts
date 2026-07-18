@@ -21,6 +21,7 @@ import { createLogger } from './logger.js';
 import { chat, type ChatMessage, type ChatResult } from './llm.js';
 import { getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
 import { isSearchConfigured, webSearch } from './search.js';
+import { isSelfieAvailable } from './selfie.js';
 import { parseToolCall } from './tools.js';
 import type { ReplyStreamer } from './send.js';
 
@@ -106,6 +107,18 @@ export const REPLY_FORMAT_CUE =
   'Longer only when explicitly requested.]';
 
 /**
+ * Extra tail-cue sentence appended while the selfie tool is offered. Once a photo turn
+ * enters the window as a `[you sent a photo: …]` block, the model starts imitating that
+ * block instead of calling the tool (measured 3/8 on the prod transcript that surfaced it).
+ * A rule inside the selfie prompt section did nothing (3/8 imitation unchanged) — only the
+ * tail position beats the in-context pattern, exactly like the reply-length cue: 0/8
+ * imitation with this sentence riding REPLY_FORMAT_CUE (2026-07-19).
+ */
+export const SELFIE_FORMAT_CUE =
+  ' Bracketed [...] lines in the chat are system records - never write one yourself; ' +
+  'to send a picture, output the send_selfie tool call.';
+
+/**
  * Returns `history` with {@link REPLY_FORMAT_CUE} appended to the trailing user turn — after
  * the photo/search blocks getWindow already composed into it. No-op when the last turn isn't
  * a user message. Proactive openers never pass through here: their director cue carries its
@@ -114,7 +127,12 @@ export const REPLY_FORMAT_CUE =
 export function withReplyCue(history: ChatMessage[]): ChatMessage[] {
   const last = history[history.length - 1];
   if (!last || last.role !== 'user') return history;
-  return [...history.slice(0, -1), { role: 'user', content: `${last.content}\n${REPLY_FORMAT_CUE}` }];
+  // The selfie sentence joins the cue only while the tool is actually offered — otherwise
+  // it would instruct the model to call a tool that isn't in its list.
+  const cue = isSelfieAvailable()
+    ? `${REPLY_FORMAT_CUE.slice(0, -1)}${SELFIE_FORMAT_CUE}]`
+    : REPLY_FORMAT_CUE;
+  return [...history.slice(0, -1), { role: 'user', content: `${last.content}\n${cue}` }];
 }
 
 /**

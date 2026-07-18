@@ -11,7 +11,13 @@ import { initSettings } from './settings.js';
 import { getLastMessageAt, rememberUserName, saveAttachment, saveMessage } from './memory.js';
 import { photoBeatMs, readDelayMs, readPauseMs, sleep } from './pacing.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
-import { finalizeReply, parseToolCall, stripToolCalls } from './tools.js';
+import {
+  extractFakePhotoProse,
+  finalizeReply,
+  parseToolCall,
+  stripFakePhotoBlocks,
+  stripToolCalls,
+} from './tools.js';
 import {
   ackLine,
   isSelfieAvailable,
@@ -262,17 +268,22 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       );
       // A send_selfie call ends the tool loop with the call still in the content (only
       // web_search is fed back). Capture its prose argument; the photo flow runs after the
-      // ack reply below is sent and persisted.
+      // ack reply below is sent and persisted. A model-written "[you sent a photo: …]"
+      // block (imitating the window's photo records instead of calling the tool) counts
+      // too: the block is stripped everywhere, but its prose IS the picture description —
+      // honoring it keeps the promise the model just made, and the stored turn comes out
+      // identical to a proper tool-call turn, so the window never carries the bad pattern.
       const call = parseToolCall(result.content);
-      const selfieProse =
-        call?.name === 'send_selfie' && isSelfieAvailable()
-          ? String(call.arguments.prompt ?? '').trim()
-          : '';
-      // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat, then flush
-      // the final bubble (or send the whole thing if nothing streamed, e.g. only a tool call).
+      const selfieProse = isSelfieAvailable()
+        ? (call?.name === 'send_selfie' ? String(call.arguments.prompt ?? '').trim() : '') ||
+          extractFakePhotoProse(result.content) ||
+          ''
+        : '';
+      // Strip any leftover tool call (cap hit) and fake photo blocks so neither reaches the
+      // chat, then flush the final bubble (or send the whole thing if nothing streamed).
       let replyText = finalizeReply(result.content);
-      if (selfieProse && !stripToolCalls(result.content).trim()) {
-        // A bare call with no ack prose of its own — finalizeReply would fall back to the
+      if (selfieProse && !stripToolCalls(stripFakePhotoBlocks(result.content)).trim()) {
+        // Nothing left once the call/block is stripped — finalizeReply falls back to the
         // search-flavored NO_ANSWER. Generate the "hang on" line instead (ephemeral cue).
         replyText = await ackLine(systemPrompt, chatId, userName, selfieProse);
       }

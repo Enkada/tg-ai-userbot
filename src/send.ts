@@ -36,6 +36,15 @@ function typingDelayMs(length: number): number {
 /** The marker that opens a tool call; a completion starting with it is control flow, not prose. */
 const TOOL_CALL_MARKER = '<tool_call>';
 
+/**
+ * Markers that end the prose portion of a stream mid-reply. Everything from one of these on
+ * is suppressed: the tool call belongs to the parser, and "[you sent" is the model imitating
+ * the photo-record block the window injects — junk that must never become a bubble (index.ts
+ * converts its intent into a real generation from the full completion). Matched
+ * case-insensitively against the lowercased stream.
+ */
+const SUPPRESS_MARKERS = [TOOL_CALL_MARKER, '[you sent'];
+
 export class ReplyStreamer {
   private readonly splitter = new SentenceSplitter();
   private readonly sentIds: number[] = [];
@@ -126,20 +135,23 @@ export class ReplyStreamer {
   private async feedGuarded(text: string): Promise<void> {
     if (this.truncated) return;
     this.guardBuf += text;
-    const idx = this.guardBuf.indexOf(TOOL_CALL_MARKER);
-    if (idx !== -1) {
+    const lower = this.guardBuf.toLowerCase();
+    const hits = SUPPRESS_MARKERS.map((m) => lower.indexOf(m)).filter((i) => i !== -1);
+    if (hits.length) {
       this.truncated = true;
-      const safe = this.guardBuf.slice(0, idx);
+      const safe = this.guardBuf.slice(0, Math.min(...hits));
       this.guardBuf = '';
       if (safe) await this.feed(safe);
       return;
     }
-    // Hold back the longest tail that is still a prefix of the marker; release the rest.
+    // Hold back the longest tail that is still a prefix of some marker; release the rest.
     let hold = 0;
-    for (let k = Math.min(TOOL_CALL_MARKER.length - 1, this.guardBuf.length); k > 0; k--) {
-      if (this.guardBuf.endsWith(TOOL_CALL_MARKER.slice(0, k))) {
-        hold = k;
-        break;
+    for (const marker of SUPPRESS_MARKERS) {
+      for (let k = Math.min(marker.length - 1, lower.length); k > hold; k--) {
+        if (lower.endsWith(marker.slice(0, k))) {
+          hold = k;
+          break;
+        }
       }
     }
     const emit = this.guardBuf.slice(0, this.guardBuf.length - hold);
