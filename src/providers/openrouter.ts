@@ -311,6 +311,39 @@ export async function factsPass(systemPrompt: string, userMessage: string): Prom
   return content;
 }
 
+/**
+ * One-shot diary-entry call, used by the diary scheduler (diary.ts). Runs on the *chat*
+ * model — the entry must be written in the same voice as the chat, so unlike
+ * {@link summarize}/{@link factsPass} it keeps the chat slug, the chat-tuned
+ * {@link PROVIDER_ROUTING} and the chat sampling temperature. It differs from
+ * {@link openRouter.chat} only in its token cap ({@link config.diary.maxTokens} — a
+ * multi-paragraph entry outgrows the chat reply cap) and in being a plain one-shot
+ * (no streaming sink, no tool loop). Throws if OpenRouter isn't configured or the call fails.
+ */
+export async function diaryEntry(systemPrompt: string, cue: string): Promise<string> {
+  if (!cfg.apiKey) throw new Error('Diary requires OpenRouter (OPENROUTER_API_KEY is missing)');
+  const { content } = await openaiChatCompletionStream({
+    url: CHAT_URL,
+    headers: authHeaders(),
+    model: cfg.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: cue },
+    ],
+    temperature: gen.temperature,
+    topP: gen.topP,
+    minP: gen.minP,
+    presencePenalty: gen.presencePenalty,
+    frequencyPenalty: gen.frequencyPenalty,
+    maxTokens: config.diary.maxTokens,
+    timeoutMs: gen.timeoutMs,
+    extraBody: EXTRA_BODY,
+    label: 'Diary',
+    dispatcher,
+  });
+  return content;
+}
+
 /** The active upstream routing preference, as configured. */
 export interface RoutingInfo {
   order: string[];

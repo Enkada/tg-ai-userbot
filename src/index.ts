@@ -19,6 +19,7 @@ import { clearInFlight, registerInFlight, stopInFlight, type InFlightHandle } fr
 import { onUserActivity, startProactiveLoop } from './proactive.js';
 import { startSummaryLoop } from './summary.js';
 import { startFactsLoop } from './facts.js';
+import { startDiaryLoop } from './diary.js';
 
 const log = createLogger('bot');
 const startedAt = Date.now();
@@ -334,6 +335,9 @@ async function main(): Promise<void> {
 
   // Start the long-term-facts diff pass (no-op unless FACTS_ENABLED=true + OpenRouter set).
   startFactsLoop();
+
+  // Start the diary scheduler (no-op unless DIARY_ENABLED=true + channel id + OpenRouter set).
+  startDiaryLoop(client);
 
   log.info('UserBot is online and listening for messages.');
 }

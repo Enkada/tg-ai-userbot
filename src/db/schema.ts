@@ -347,6 +347,56 @@ export const factsState = sqliteTable('facts_state', {
 export type FactsStateRow = typeof factsState.$inferSelect;
 
 /**
+ * Diary ("the basement tapes"): every entry the bot has posted to its private channel. The
+ * newest {@link config.diary.recentEntries} rows are injected into the diary system prompt
+ * as a `# Your recent entries` block (the anti-repetition reference), and `/diary` reads
+ * them for status. Append-only — there is no user-facing delete; a post pulled from the
+ * channel by hand simply stays here as history.
+ */
+export const diaryPosts = sqliteTable('diary_posts', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  /** The entry text exactly as posted (post-sanitize). */
+  content: text('content').notNull(),
+  /** Telegram message id of the channel post, when the send succeeded. */
+  tgMessageId: integer('tg_message_id'),
+  /**
+   * The ephemeral director cue this entry was generated against (length/register/focus roll
+   * + sparks). Never re-enters any prompt — kept purely so repetitive output can be traced
+   * back to what was rolled ("do petty posts fixate?") without guessing.
+   */
+  cue: text('cue'),
+  /** Epoch milliseconds. */
+  createdAt: integer('created_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type DiaryPostRow = typeof diaryPosts.$inferSelect;
+
+/**
+ * The diary scheduler's day plan — a single-row table (always `id` = 1; the diary is global,
+ * one channel per account, not per-chat). Rolled once per calendar day: how many entries
+ * today and when, so a restart mid-day resumes the same plan instead of rerolling (which
+ * would skew the "1-3 random posts" distribution toward more).
+ */
+export const diaryState = sqliteTable('diary_state', {
+  /** Singleton key — exactly one row, always id 1. */
+  id: integer('id').primaryKey(),
+  /** Local calendar day the plan belongs to, as `YYYY-MM-DD`. A tick on a new day rerolls. */
+  planDay: text('plan_day'),
+  /** Epoch-ms due times for today's entries, ascending. May be empty (day rolled 0 slots left). */
+  dueTimes: text('due_times', { mode: 'json' }).$type<number[]>(),
+  /** Index into {@link dueTimes} of the next unposted slot (posted or skipped-as-stale). */
+  nextIdx: integer('next_idx').notNull().default(0),
+  /** Epoch ms of the last update. */
+  updatedAt: integer('updated_at')
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export type DiaryStateRow = typeof diaryState.$inferSelect;
+
+/**
  * Global, runtime-mutable settings — a single-row table (always `id` = 1). Unlike the env
  * vars in {@link config}, these can be changed live from the chat and survive restarts, so
  * a deploy (which restarts the process) doesn't reset them. Kept as typed columns rather than

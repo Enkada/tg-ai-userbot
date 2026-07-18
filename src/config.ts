@@ -329,6 +329,53 @@ export const config = {
     /** Per-request timeout (ms). Upstreams for this model ranged 1.5–40s in testing. */
     timeoutMs: numberEnv('FACTS_TIMEOUT_MS', 90_000),
   },
+  // ---- Diary: unprompted posts to the character's private channel ("the basement tapes") ----
+  diary: {
+    /**
+     * Master switch. Also requires `DIARY_CHANNEL_ID` and `OPENROUTER_API_KEY` — diary
+     * entries always run through OpenRouter (like summaries/facts), independent of the
+     * active chat provider.
+     */
+    enabled: boolEnv('DIARY_ENABLED', false),
+    /**
+     * Marked Telegram id of the private channel entries are posted to (e.g. -100123…).
+     * Unset ⇒ the scheduler never starts; `/diary` lists candidate channels (channels
+     * this account can post to) so the id can be copied into .env once.
+     */
+    channelId: optionalNumberEnv('DIARY_CHANNEL_ID'),
+    /** Posting window (local hours): entries land only while start ≤ hour < end. */
+    windowStartHour: numberEnv('DIARY_WINDOW_START', 7),
+    windowEndHour: numberEnv('DIARY_WINDOW_END', 23),
+    /** Minimum minutes between two entries on the same day. */
+    minGapMinutes: numberEnv('DIARY_MIN_GAP_MINUTES', 120),
+    /**
+     * A due slot older than this (missed while the bot was down) is skipped, not posted —
+     * otherwise a restart after long downtime would dump the whole backlog at once.
+     */
+    graceMinutes: numberEnv('DIARY_GRACE_MINUTES', 60),
+    /** How often the scheduler evaluates the plan (ms). Cheap tick — a DB read, no LLM call. */
+    tickMs: numberEnv('DIARY_TICK_MS', 60_000),
+    /** Cap on one entry. Generous: the longest roll (2-3 paragraphs) measured ~500 tokens. */
+    maxTokens: numberEnv('DIARY_MAX_TOKENS', 700),
+    /**
+     * Chance (0-1) an entry is *allowed* to be about the user: the recent-conversation
+     * transcript is included and no focus restriction applies. The rest of the entries get
+     * an explicit "leave him out entirely" cue AND no transcript — tested as the only
+     * reliable way to keep the diary from becoming a retelling of the chat.
+     */
+    aboutChance: numberEnv('DIARY_ABOUT_CHANCE', 0.3),
+    /** How many of the newest posted entries are fed back as the anti-repetition block. */
+    recentEntries: numberEnv('DIARY_RECENT_ENTRIES', 8),
+    /** The recent-conversation block's reach (hours back) and hard cap (messages). */
+    transcriptHours: numberEnv('DIARY_TRANSCRIPT_HOURS', 48),
+    transcriptMaxMessages: numberEnv('DIARY_TRANSCRIPT_MAX', 40),
+    /** How many random spark words are offered per entry (from prompts/diary-words.txt). */
+    sparkCount: numberEnv('DIARY_SPARKS', 8),
+    /** App-owned diary instruction layer (what the channel is, how she writes there). */
+    promptPath: process.env.DIARY_PROMPT_PATH ?? 'prompts/diary.txt',
+    /** Curated spark-word list, one word/phrase per line. */
+    wordsPath: process.env.DIARY_WORDS_PATH ?? 'prompts/diary-words.txt',
+  },
 } as const;
 
 if (!Number.isInteger(config.apiId)) {

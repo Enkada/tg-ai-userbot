@@ -52,6 +52,7 @@ import { ReplyStreamer } from './send.js';
 import { splitMessage } from './chunker.js';
 import { stopInFlight } from './inflight.js';
 import { getProactiveStatus, runContinue, runProactiveNow } from './proactive.js';
+import { getDiaryStatus, listCandidateChannels, runDiaryNow } from './diary.js';
 
 /** Display labels for chat roles, used by /prompt. */
 const ROLE_LABELS: Record<'system' | 'user' | 'assistant', string> = {
@@ -566,6 +567,31 @@ register({
       return;
     }
     await reply(md(`🛎️ **Proactive**\n${getProactiveStatus(chatId)}`));
+  },
+});
+
+register({
+  name: 'diary',
+  description: 'Show the diary schedule; /diary test posts an entry now',
+  handler: async ({ client, reply, args }) => {
+    const sub = args[0]?.toLowerCase();
+    if (sub === 'test') {
+      const result = await runDiaryNow(client);
+      await reply(md(`📓 **Diary test**\n${result}`));
+      return;
+    }
+    let body = getDiaryStatus();
+    // No channel configured yet: append the candidates (channels this account can post to)
+    // so the id can be copied into .env without grepping logs or scripting the API. Not
+    // gated on `enabled` — the id can then be discovered before flipping the feature on,
+    // and both settings land in .env in one edit (one restart instead of two).
+    if (config.diary.channelId === undefined) {
+      const candidates = await listCandidateChannels(client);
+      body += candidates.length
+        ? `\n\nChannels this account can post to:\n${candidates.map((c) => `• \`${c.id}\` — ${c.title}`).join('\n')}\nSet \`DIARY_CHANNEL_ID\` in .env and restart.`
+        : '\n\nNo postable channels found — create one from this account first.';
+    }
+    await reply(md(`📓 **Diary**\n${body}`));
   },
 });
 
