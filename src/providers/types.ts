@@ -74,7 +74,12 @@ export interface LlmProvider {
    * tokens as they arrive (the bot streams the reply as bubbles), or omit it to just collect
    * the full text. Returns the complete reply either way. `systemPrompt` is already rendered.
    */
-  chat(systemPrompt: string, history: ChatMessage[], onToken?: TokenSink): Promise<ChatResult>;
+  chat(
+    systemPrompt: string,
+    history: ChatMessage[],
+    onToken?: TokenSink,
+    signal?: AbortSignal,
+  ): Promise<ChatResult>;
   /** One vision pass over an image, returning a concise one-line caption. */
   describeImage(base64: string, mime?: string): Promise<string>;
   /** Reachability + current model + vision. Never throws. */
@@ -127,6 +132,12 @@ export async function openaiChatCompletionStream(opts: {
   onToken?: TokenSink;
   /** Undici dispatcher (e.g. a ProxyAgent) to route this call through. Omit to connect direct. */
   dispatcher?: Dispatcher;
+  /**
+   * External abort signal (e.g. `/stop`). Combined with the timeout so either fires: a
+   * user-aborted call rejects with an `AbortError`, a timed-out one with a `TimeoutError`,
+   * letting callers tell "the user stopped it" from "the model hung".
+   */
+  signal?: AbortSignal;
 }): Promise<ChatResult> {
   const {
     url,
@@ -144,7 +155,15 @@ export async function openaiChatCompletionStream(opts: {
     label = 'LLM',
     onToken,
     dispatcher,
+    signal,
   } = opts;
+
+  // The whole exchange is capped by the timeout; an optional external signal (`/stop`) can
+  // cut it short. `AbortSignal.any` adopts whichever fires first, preserving its reason — so
+  // a timeout still surfaces as `TimeoutError` while a user stop surfaces as `AbortError`.
+  const abortSignal = signal
+    ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
+    : AbortSignal.timeout(timeoutMs);
 
   // undici's own fetch is used everywhere so an optional `dispatcher` (e.g. a proxy) can be
   // passed straight through; a `dispatcher` of undefined falls back to the global dispatcher,
@@ -152,7 +171,7 @@ export async function openaiChatCompletionStream(opts: {
   const res = await undiciFetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: abortSignal,
     body: JSON.stringify({
       model,
       messages,

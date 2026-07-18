@@ -47,7 +47,7 @@ export const llamaCpp: LlmProvider = {
   // Local server is always "configured"; whether it's reachable is what status() reports.
   isConfigured: () => true,
 
-  async chat(systemPrompt, history, onToken) {
+  async chat(systemPrompt, history, onToken, signal) {
     return openaiChatCompletionStream({
       url: CHAT_URL,
       model: cfg.model,
@@ -62,6 +62,7 @@ export const llamaCpp: LlmProvider = {
       extraBody: REASONING_OFF,
       label: 'LLM',
       onToken,
+      signal,
     });
   },
 

@@ -47,7 +47,8 @@ export const chat = (
   systemPrompt: string,
   history: ChatMessage[],
   onToken?: TokenSink,
-): Promise<ChatResult> => active.chat(systemPrompt, history, onToken);
+  signal?: AbortSignal,
+): Promise<ChatResult> => active.chat(systemPrompt, history, onToken, signal);
 
 /**
  * Captions one image. Prefers the active provider's own model when it has vision — free local

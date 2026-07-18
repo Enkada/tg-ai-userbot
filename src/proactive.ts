@@ -35,6 +35,7 @@ import {
   upsertProactiveState,
 } from './memory.js';
 import { finalizeReply } from './tools.js';
+import { clearInFlight, registerInFlight } from './inflight.js';
 import { formatDateTime } from './format.js';
 import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
@@ -118,43 +119,94 @@ function buildReachoutCue(framing: Framing, attempt: number, userName: string): 
 }
 
 /**
- * Generates an opener in-character (against the given cue) and sends it, persisting it as a
- * proactive assistant message. The cue is injected only into the in-memory generation array —
- * never stored — so it can't pollute the user-activity timer or future context; the opener may
- * still run the `web_search` tool, with the search held in memory only (see
- * {@link ephemeralSearchStrategy}). Throws on failure (the caller decides how to recover).
+ * Generates an in-character turn against an ephemeral director `cue` and sends it, persisting the
+ * result as an assistant message. The cue is injected only into the in-memory generation array —
+ * never stored — so it can't pollute the user-activity timer or future context; the turn may still
+ * run the `web_search` tool, with the search held in memory only (see {@link ephemeralSearchStrategy}).
+ * Throws on failure (the caller decides how to recover).
+ *
+ * `opts.includeMemory` drops the long-term-memory block for cold openers (see {@link sendReachout});
+ * `opts.proactive` flags the stored row as bot-initiated (the reach-out guard), left false for the
+ * user-triggered {@link runContinue}; `opts.interruptible` registers the generation so `/stop` can
+ * abort it (only `/continue` — automated openers are short and their abort would tangle with the
+ * reach-out reschedule state machine).
  */
-async function sendOpener(
+async function sendCued(
   client: TelegramClient,
   chatId: number,
   cue: string,
   userName: string,
   label: string,
+  opts: { includeMemory: boolean; proactive: boolean; interruptible: boolean },
 ): Promise<void> {
-  // Openers omit the long-term-memory block: with no user message to anchor on, the model
-  // fixates on the most salient summary and rehashes it every reach-out (see renderSystemPrompt).
-  // The live recent-message window still grounds short-term continuity.
-  const systemPrompt = renderSystemPrompt({ userName, chatId }, { includeMemory: false });
+  const systemPrompt = renderSystemPrompt({ userName, chatId }, { includeMemory: opts.includeMemory });
   const peer: InputPeerLike = chatId;
   const streamer = new ReplyStreamer(client, peer);
-  let reply: ChatResult;
+  // When interruptible, make this generation stoppable: /stop aborts the model call and the stream.
+  const controller = opts.interruptible ? new AbortController() : undefined;
+  const inflight = controller ? registerInFlight(chatId, { controller, stop: () => streamer.stop() }) : undefined;
   try {
-    reply = await withTyping(client, peer, () =>
-      generateReply(systemPrompt, ephemeralSearchStrategy(chatId, cue), label, streamer),
-    );
-  } catch (err) {
-    // If bubbles already streamed, persist them (proactive flag) so the "one outstanding
-    // proactive message" guard stays consistent with the chat, then rethrow for the caller.
-    const partialText = finalizeReply(streamer.streamedText);
-    if (streamer.ids.length > 0 && partialText) {
-      saveMessage(chatId, 'assistant', partialText, streamer.ids, { provider: activeProviderId(), model: null }, true);
+    let reply: ChatResult;
+    try {
+      reply = await withTyping(client, peer, () =>
+        generateReply(systemPrompt, ephemeralSearchStrategy(chatId, cue), label, streamer, controller?.signal),
+      );
+    } catch (err) {
+      // If bubbles already streamed, persist them so memory (and the "one outstanding proactive
+      // message" guard, for openers) stays consistent with the chat, then rethrow for the caller.
+      const partialText = finalizeReply(streamer.streamedText);
+      if (streamer.ids.length > 0 && partialText) {
+        saveMessage(chatId, 'assistant', partialText, streamer.ids, { provider: activeProviderId(), model: null }, opts.proactive);
+      }
+      throw err;
     }
-    throw err;
+    const text = finalizeReply(reply.content);
+    const sentIds = await streamer.finalize(text);
+    saveMessage(chatId, 'assistant', text, sentIds, { provider: activeProviderId(), model: reply.model }, opts.proactive);
+    log.info(`${label} sent: ${text.slice(0, 80)}`);
+  } finally {
+    if (inflight) clearInFlight(chatId, inflight);
   }
-  const text = finalizeReply(reply.content);
-  const sentIds = await streamer.finalize(text);
-  saveMessage(chatId, 'assistant', text, sentIds, { provider: activeProviderId(), model: reply.model }, true);
-  log.info(`${label} sent: ${text.slice(0, 80)}`);
+}
+
+/**
+ * Builds the ephemeral director cue for `/continue` — the user, stuck for what to say, asks the
+ * bot to move the thread along. Empty directive: open on its own initiative. With a directive: a
+ * stage direction, never reported as the user's own words — "<user> said …" makes the model break
+ * character to point out it can't pretend the user said that (measured on prod), whereas the raw
+ * "keep the conversation going: <directive>" stays in-character. Brevity is baked in, so unlike a
+ * reactive reply this cue does NOT stack the separate reply-length cue.
+ */
+export function buildContinueCue(userName: string, directive: string): string {
+  const d = directive.trim();
+  if (!d) {
+    return (
+      `[System note: keep the conversation going on your own - say what's on your mind or ask ` +
+      `${userName} something, or pick a previous thread back up, whatever feels natural. Don't ` +
+      `comment on them being quiet. Keep it short, like a normal text.]`
+    );
+  }
+  return `[System note: keep the conversation going: ${d}. Keep it short, like a normal text.]`;
+}
+
+/**
+ * `/continue [directive]` — generates and sends the next turn on the user's command, so they can
+ * nudge a stalled conversation along. Unlike a reach-out this is user-triggered: it keeps the
+ * memory block and is stored as a normal (non-proactive) reply, and it doesn't touch the reach-out
+ * schedule (commands never do). Throws on failure for the command dispatcher to surface.
+ */
+export async function runContinue(
+  client: TelegramClient,
+  chatId: number,
+  userName: string,
+  directive: string,
+): Promise<void> {
+  const cue = buildContinueCue(userName, directive);
+  await sendCued(client, chatId, cue, userName, `Continue chat ${chatId}`, {
+    includeMemory: true,
+    proactive: false,
+    interruptible: true,
+  });
 }
 
 /** Sends a reach-out (morning greeting or daytime opener) as attempt #`attempt`. */
@@ -166,7 +218,14 @@ async function sendReachout(
   userName: string,
 ): Promise<void> {
   const cue = buildReachoutCue(framing, attempt, userName);
-  await sendOpener(client, chatId, cue, userName, `Proactive [${framing} #${attempt}] chat ${chatId}`);
+  // Openers omit the long-term-memory block: with no user message to anchor on, the model fixates
+  // on the most salient summary and rehashes it every reach-out (see renderSystemPrompt). The live
+  // recent-message window still grounds short-term continuity. Stored proactive (the reach-out guard).
+  await sendCued(client, chatId, cue, userName, `Proactive [${framing} #${attempt}] chat ${chatId}`, {
+    includeMemory: false,
+    proactive: true,
+    interruptible: false,
+  });
 }
 
 // ---- The per-chat reach-out state machine ------------------------------------------------

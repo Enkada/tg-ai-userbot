@@ -48,16 +48,20 @@ export interface ToolLoopStrategy {
  * to the chat as it generates. Each completion is a fresh pass ({@link ReplyStreamer.beginPass}),
  * so the streamer suppresses the intermediate tool-call passes and streams only the final prose.
  * The caller still gets the full {@link ChatResult} back to finalize and persist.
+ *
+ * An optional `signal` aborts the in-flight model call (each pass) — `/stop` uses it to cut a
+ * runaway generation short; the aborted call rejects with an `AbortError` for the caller to handle.
  */
 export async function generateReply(
   systemPrompt: string,
   strategy: ToolLoopStrategy,
   label: string,
   streamer?: ReplyStreamer,
+  signal?: AbortSignal,
 ): Promise<ChatResult> {
   const run = (): Promise<ChatResult> => {
     streamer?.beginPass();
-    return chat(systemPrompt, strategy.buildHistory(), streamer?.onToken);
+    return chat(systemPrompt, strategy.buildHistory(), streamer?.onToken, signal);
   };
 
   let result = await run();

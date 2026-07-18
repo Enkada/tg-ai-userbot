@@ -49,7 +49,9 @@ import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
 import { finalizeReply, renderToolsBlock } from './tools.js';
 import { ReplyStreamer } from './send.js';
-import { getProactiveStatus, runProactiveNow } from './proactive.js';
+import { splitMessage } from './chunker.js';
+import { stopInFlight } from './inflight.js';
+import { getProactiveStatus, runContinue, runProactiveNow } from './proactive.js';
 
 /** Display labels for chat roles, used by /prompt. */
 const ROLE_LABELS: Record<'system' | 'user' | 'assistant', string> = {
@@ -298,6 +300,65 @@ register({
   },
 });
 
+register({
+  name: 'trim',
+  aliases: ['t'],
+  description: "Trim the last N bubbles off my most recent reply (default 1): /t [N]",
+  handler: async ({ client, msg, reply, chatId, args }) => {
+    const n = args.length ? Number(args[0]) : 1;
+    if (!Number.isInteger(n) || n < 1) {
+      await reply(md('Usage: `/t [N]` — trims the last N bubbles off my most recent reply (default 1).'));
+      return;
+    }
+    // Only trim when the reply is genuinely the last turn (like /reroll); a newer user message
+    // would make "the last reply" ambiguous.
+    if (getLastRole(chatId) !== 'assistant') {
+      await reply('Nothing to trim — the last message is not my reply.');
+      return;
+    }
+    const last = getLastAssistant(chatId);
+    if (!last) {
+      await reply('Nothing to trim — no previous reply.');
+      return;
+    }
+    if (last.tgMessageIds === null) {
+      await reply('Cannot trim — this reply predates message-id tracking.');
+      return;
+    }
+
+    // Re-split the stored reply into the same bubbles it was sent as. The split is deterministic
+    // and idempotent with sanitize, so an ordinary streamed reply re-splits to exactly its stored
+    // bubble ids. When the counts don't match — a /update'd reply (one message, many sentences), an
+    // empty/degenerate reply, or a rare prose+tool-tag leak — the mapping is unsafe, so refuse
+    // rather than revoke the wrong bubble.
+    const ids = last.tgMessageIds;
+    const pieces = splitMessage(last.content);
+    if (pieces.length !== ids.length) {
+      await reply(md("Can't cleanly trim this reply — its bubbles don't line up (likely edited via `/u`). Use `/u` to rewrite it."));
+      return;
+    }
+
+    // Trimming the whole reply (or more) is just a full delete — reuse the /delete path so the row
+    // is flagged and every bubble revoked, consistent with `/d 1`.
+    if (n >= pieces.length) {
+      const { tgMessageIds } = deleteLastMessages(chatId, 1);
+      if (tgMessageIds.length) {
+        await client.deleteMessagesById(msg.chat, tgMessageIds, { revoke: true }).catch(() => {});
+      }
+      return;
+    }
+
+    // Revoke the last N bubbles and repoint the row at what's left. Kept pieces are rejoined with
+    // newlines (a terminator the splitter honours) so their dot-stripped forms re-split identically
+    // on a later /trim; provenance is left unchanged (still my words, just shorter).
+    const dropIds = ids.slice(ids.length - n);
+    const keepIds = ids.slice(0, ids.length - n);
+    await client.deleteMessagesById(msg.chat, dropIds, { revoke: true }).catch(() => {});
+    updateMessageContent(last.id, pieces.slice(0, pieces.length - n).join('\n'), undefined, keepIds);
+    // No confirmation — the bubbles vanishing is the feedback (like /d).
+  },
+});
+
 /** Non-deleted message count above which /nuke demands an explicit `confirm` argument. */
 const NUKE_CONFIRM_THRESHOLD = 20;
 
@@ -330,6 +391,19 @@ Send \`/nuke confirm\` to proceed.`),
     upsertProactiveState(chatId, { dueAt: null, isMorning: false, ignoredCount: 0 });
     // The tracked panel/file/command messages died with the history — drop their rows.
     forgetDebris(chatId);
+  },
+});
+
+register({
+  name: 'clear',
+  aliases: ['cls'],
+  description: 'Clear leftover command output (the panel) without sending a message',
+  handler: async ({ dropPanel }) => {
+    // The dispatcher already swept /dump files and stranded command messages before this handler
+    // ran, and the /clear message itself is deleted afterward — so dropping the panel is all that's
+    // left to return the chat to just the conversation. Deliberately no reply(): it would only
+    // spawn a fresh panel in place of the one we're clearing.
+    await dropPanel();
   },
 });
 
@@ -446,6 +520,37 @@ register({
     updateMessageContent(last.id, text, null, [sent.id]);
     // Like /r: the replacement text is the output — clear any open panel with the swap.
     await dropPanel();
+  },
+});
+
+register({
+  name: 'continue',
+  aliases: ['go'],
+  description: 'Advance the conversation on my behalf when you\'re stuck: /go [directive]',
+  handler: async ({ client, dropPanel, chatId, userName, rawArgs }) => {
+    // The output is the streamed reply itself (like /reroll and /update), not the panel — clear any
+    // open panel so a leftover /prompt dump doesn't hover above the new turn. An optional directive
+    // steers what to say ("/go ask about the weekend"); empty just keeps the thread moving.
+    await dropPanel();
+    try {
+      await runContinue(client, chatId, userName, rawArgs.trim());
+    } catch (err) {
+      // /stop aborts the generation with an AbortError — an intentional halt, not a failure: the
+      // partial is already persisted, so swallow it rather than show the dispatcher's error panel.
+      // Any real failure still propagates for the dispatcher to surface.
+      if ((err as { name?: string } | null)?.name !== 'AbortError') throw err;
+    }
+  },
+});
+
+register({
+  name: 'stop',
+  description: 'Stop my reply mid-generation — aborts the model and halts further messages',
+  handler: async ({ chatId }) => {
+    // Normally intercepted out-of-queue by the dispatcher so it can interrupt an in-flight reply
+    // instead of queueing behind it (index.ts). This registry entry keeps /stop in /help and acts
+    // as a harmless fallback if it ever reaches here (there's nothing generating to abort).
+    stopInFlight(chatId);
   },
 });
 

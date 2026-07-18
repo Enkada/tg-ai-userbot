@@ -42,6 +42,7 @@ export class ReplyStreamer {
   private lastEventAt = Date.now();
   private sentAny = false;
   private streamed = '';
+  private stopped = false;
 
   // Per-completion sniff state (reset by beginPass): is this pass prose or a tool call?
   private decided: 'unknown' | 'prose' | 'tool' = 'unknown';
@@ -67,6 +68,15 @@ export class ReplyStreamer {
   /** All prose streamed so far — used to persist a reply that failed partway through. */
   get streamedText(): string {
     return this.streamed;
+  }
+
+  /**
+   * Stop sending any further bubbles (`/stop`). The in-flight model call is aborted separately;
+   * this guards the send side so no bubble already in the pipeline — including one mid typing-
+   * pause — reaches the chat after the user asked to stop. Whatever landed before this stays.
+   */
+  stop(): void {
+    this.stopped = true;
   }
 
   /** Reset tool-call sniffing before each streamed completion in a tool loop. */
@@ -117,6 +127,8 @@ export class ReplyStreamer {
 
   /** Send one bubble, pacing it like typing and keeping "typing…" up across the wait. */
   private async send(chunk: string): Promise<void> {
+    // Stopped by /stop: drop this bubble and every one after it.
+    if (this.stopped) return;
     // Fire the one-shot pre-send hook the moment we have a bubble to show (e.g. /reroll clears
     // the old reply here, so the swap is clean and nothing is removed if generation produced none).
     if (!this.sentAny && this.onFirstBubble) await this.onFirstBubble();
@@ -125,6 +137,8 @@ export class ReplyStreamer {
       this.client.sendTyping(this.peer, 'typing').catch(() => {});
       await sleep(idle);
     }
+    // /stop may have landed during the typing pause — re-check before the message actually goes out.
+    if (this.stopped) return;
     const sent = await this.client.sendText(this.peer, renderMarkdown(chunk));
     this.sentIds.push(sent.id);
     this.lastEventAt = Date.now();

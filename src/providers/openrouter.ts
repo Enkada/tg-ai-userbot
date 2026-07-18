@@ -160,7 +160,7 @@ export const openRouter: LlmProvider = {
 
   isConfigured: () => Boolean(cfg.apiKey),
 
-  async chat(systemPrompt, history, onToken) {
+  async chat(systemPrompt, history, onToken, signal) {
     return openaiChatCompletionStream({
       url: CHAT_URL,
       headers: authHeaders(),
@@ -177,6 +177,7 @@ export const openRouter: LlmProvider = {
       label: 'OpenRouter',
       onToken,
       dispatcher,
+      signal,
     });
   },
 

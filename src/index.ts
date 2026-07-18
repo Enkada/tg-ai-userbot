@@ -15,6 +15,7 @@ import { finalizeReply } from './tools.js';
 import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
 import { enqueue } from './queue.js';
+import { clearInFlight, registerInFlight, stopInFlight, type InFlightHandle } from './inflight.js';
 import { onUserActivity, startProactiveLoop } from './proactive.js';
 import { startSummaryLoop } from './summary.js';
 import { startFactsLoop } from './facts.js';
@@ -46,6 +47,19 @@ function handleMessage(msg: Message, selfName: string): void {
   const senderId = msg.sender.id;
   if (!isWhitelisted(senderId)) {
     log.debug(`Ignoring message from non-whitelisted user ${senderId}`);
+    return;
+  }
+
+  // `/stop` must bypass the per-chat queue: enqueued, it would run only AFTER the generation
+  // it's meant to interrupt. Handle it here, before enqueue, so it hits the live call at once.
+  // (It's text-only; a photo caption is never a command.) The aborted generation's own partial
+  // path keeps and persists whatever bubbles already landed.
+  const stopCmd = msg.text ? parseCommand(msg.text) : null;
+  if (stopCmd?.name === 'stop') {
+    const stopped = stopInFlight(msg.chat.id);
+    log.info(`/stop from ${senderId} — ${stopped ? 'aborted in-flight generation' : 'nothing in flight'}`);
+    client.readHistory(msg.chat, { maxId: msg.id }).catch(() => {});
+    client.deleteMessages([msg], { revoke: true }).catch(() => {});
     return;
   }
 
@@ -195,6 +209,8 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
   // believably began), but declared out here so the catch block can recover whatever
   // bubbles already landed if generation fails partway.
   let streamer: ReplyStreamer | undefined;
+  // Registered once generation starts so an out-of-band /stop can abort this exact call.
+  let inflight: InFlightHandle | undefined;
   try {
     const systemPrompt = renderSystemPrompt({ userName, chatId });
     // Store the user message's Telegram id too, so /delete can revoke it in the chat.
@@ -222,6 +238,9 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
     streamer = new ReplyStreamer(client, msg.chat);
     // A const alias so the closure below sees a definitely-assigned streamer.
     const sink = streamer;
+    // Make this generation interruptible: /stop aborts the model call and stops the bubbles.
+    const controller = new AbortController();
+    inflight = registerInFlight(chatId, { controller, stop: () => sink.stop() });
     // Generate and stream the reply under one typing indicator.
     const reply = await withTyping(client, msg.chat, async () => {
       // Build the cache-friendly window (now including this message + caption) and reply,
@@ -231,6 +250,7 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
         persistedSearchStrategy(chatId, userRowId),
         `chat ${chatId}`,
         sink,
+        controller.signal,
       );
       // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat, then flush
       // the final bubble (or send the whole thing if nothing streamed, e.g. only a tool call).
@@ -247,23 +267,34 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       model: reply.model,
     });
   } catch (err) {
+    // A user /stop aborts the model call with an AbortError (a timeout/real failure does not) —
+    // that's an intentional halt, not an error: keep the partial silently, never apologize.
+    const aborted = (err as { name?: string } | null)?.name === 'AbortError';
     // If some bubbles already streamed before the failure, persist them so memory matches the
     // chat; only fall back to an apology when the user saw nothing at all (including a
     // failure — e.g. in the vision pass — before the streamer even existed).
     const partialIds = streamer?.ids ?? [];
     const partialText = streamer ? finalizeReply(streamer.streamedText) : '';
     if (partialIds.length > 0 && partialText) {
-      log.error('Reply only partially streamed:', err);
+      if (aborted) log.info(`Generation stopped by user — kept ${partialIds.length} bubble(s).`);
+      else log.error('Reply only partially streamed:', err);
       saveMessage(chatId, 'assistant', partialText, partialIds, {
         provider: activeProviderId(),
         model: null,
       });
+    } else if (aborted) {
+      // Stopped before anything reached the chat — nothing to keep, nothing to apologize for.
+      log.info('Generation stopped by user before any bubble was sent.');
     } else {
       log.error('LLM error:', err);
       // The apology is ephemeral, not conversation: route it through the panel so a
       // retry that fails again edits the same notice, and any reply sweeps it away.
       await showPanel(client, msg.chat, chatId, '⚠️ Sorry, I could not get a response from the language model.');
     }
+  } finally {
+    // Generation is over (done, failed, or stopped): drop the interrupt registration so a later
+    // /stop can't abort an unrelated call. Guarded on identity, so it never clears a newer one.
+    if (inflight) clearInFlight(chatId, inflight);
   }
 }
 
