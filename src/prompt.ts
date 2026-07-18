@@ -94,6 +94,13 @@ export function dayPeriod(hour: number): string {
  * - `{{day}}`    — weekday, e.g. "Monday"
  * - `{{period}}` — day period: morning / afternoon / evening / night
  *
+ * Valued tags take a `YYYY-MM-DD` argument after a colon:
+ * - `{{days-since:2026-07-04}}` — calendar days elapsed since the date (never negative)
+ * - `{{days-until:2026-12-31}}` — calendar days until the date; once passed it counts down
+ *                                 to the next anniversary of its month/day (never negative)
+ * - `{{age:2005-03-14}}`        — completed years since the date (a birthdate)
+ * - `{{since:2026-07-04}}`      — humanized elapsed time, e.g. "2 months and 5 days"
+ *
  * Unknown tags are left untouched (so typos stay visible).
  *
  * `opts.includeMemory` (default true) controls the `# Memory` block. Reactive replies want it;
@@ -102,8 +109,85 @@ export function dayPeriod(hour: number): string {
  * (observed: 6/6 openers fixated on the same memory). Openers still carry the live recent-message
  * window, so short-term continuity is preserved; only multi-day recall is withheld from them.
  */
-/** Substitutes `{{tag}}` placeholders in one layer of text; unknown tags are left untouched. */
-function substitute(text: string, ctx: PromptContext, now: Date): string {
+/** Parses a strict `YYYY-MM-DD` string into a local-midnight Date; null when malformed or not a real date. */
+function parseIsoDate(value: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const date = new Date(y, mo - 1, d);
+  // Round-trip check rejects rolled-over impossibilities like 2026-02-31.
+  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) return null;
+  return date;
+}
+
+/** Calendar-day difference `b - a` in the process timezone (rounding absorbs DST hour shifts). */
+function dayDiff(a: Date, b: Date): number {
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.round((midnight(b) - midnight(a)) / 86_400_000);
+}
+
+/** Joins duration parts English-style: `[a]`, `[a and b]`, `[a, b and c]`. */
+function joinParts(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? '0 days';
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * Handlers for `{{tag:YYYY-MM-DD}}` tags. Each receives the parsed date and the render
+ * time and returns the substitution text. Exported for tests/scratch checks.
+ */
+export const valuedTags: Record<string, (date: Date, now: Date) => string> = {
+  /** Calendar days elapsed since the date; a future date clamps to 0 instead of going negative. */
+  'days-since': (date, now) => String(Math.max(0, dayDiff(date, now))),
+
+  /**
+   * Calendar days until the date. A passed date recurs annually: it counts down to the next
+   * occurrence of its month/day (0 on the day itself, ~364 the day after — never negative).
+   * Feb 29 rolls over to Mar 1 in non-leap years via Date's own overflow.
+   */
+  'days-until': (date, now) => {
+    const direct = dayDiff(now, date);
+    if (direct >= 0) return String(direct);
+    let next = new Date(now.getFullYear(), date.getMonth(), date.getDate());
+    if (dayDiff(now, next) < 0) next = new Date(now.getFullYear() + 1, date.getMonth(), date.getDate());
+    return String(dayDiff(now, next));
+  },
+
+  /** Completed years since the date (i.e. current age for a birthdate); future dates clamp to 0. */
+  age: (date, now) => {
+    let years = now.getFullYear() - date.getFullYear();
+    if (dayDiff(new Date(now.getFullYear(), date.getMonth(), date.getDate()), now) < 0) years--;
+    return String(Math.max(0, years));
+  },
+
+  /** Humanized elapsed time since the date: "13 days", "2 months and 5 days", "1 year, 2 months and 3 days". */
+  since: (date, now) => {
+    let years = now.getFullYear() - date.getFullYear();
+    let months = now.getMonth() - date.getMonth();
+    let days = now.getDate() - date.getDate();
+    if (days < 0) {
+      months--;
+      days += new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+    }
+    if (months < 0) {
+      years--;
+      months += 12;
+    }
+    if (years < 0) return '0 days';
+    const parts: string[] = [];
+    if (years > 0) parts.push(`${years} year${years === 1 ? '' : 's'}`);
+    if (months > 0) parts.push(`${months} month${months === 1 ? '' : 's'}`);
+    if (days > 0) parts.push(`${days} day${days === 1 ? '' : 's'}`);
+    return joinParts(parts);
+  },
+};
+
+/**
+ * Substitutes `{{tag}}` and `{{tag:value}}` placeholders in one layer of text. Unknown tags
+ * are left untouched, as is a known valued tag with an unparseable date (logged, so the
+ * mistake is visible in both the rendered prompt and the log).
+ */
+export function substitute(text: string, ctx: PromptContext, now: Date): string {
   const vars: Record<string, string> = {
     char: getCharName(),
     user: ctx.userName,
@@ -111,9 +195,17 @@ function substitute(text: string, ctx: PromptContext, now: Date): string {
     day: now.toLocaleDateString('en-US', { weekday: 'long' }),
     period: dayPeriod(now.getHours()),
   };
-  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, name: string) => {
+  return text.replace(/\{\{\s*([\w-]+)\s*(?::\s*([^}]*?)\s*)?\}\}/g, (match, name: string, value: string | undefined) => {
     const key = name.toLowerCase();
-    return key in vars ? vars[key] : match;
+    if (value === undefined) return key in vars ? vars[key] : match;
+    const handler = valuedTags[key];
+    if (!handler) return match;
+    const date = parseIsoDate(value);
+    if (!date) {
+      log.warn(`Bad date "${value}" in {{${key}:...}} — leaving tag untouched`);
+      return match;
+    }
+    return handler(date, now);
   });
 }
 
