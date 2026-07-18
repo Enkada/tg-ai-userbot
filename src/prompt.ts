@@ -5,6 +5,7 @@ import { FACT_CATEGORIES } from './db/schema.js';
 import { createLogger } from './logger.js';
 import { getFacts, getRecentSummaries } from './memory.js';
 import { getPersona } from './persona.js';
+import { isSelfieAvailable } from './selfie.js';
 import { getCharName } from './settings.js';
 import { renderToolsBlock } from './tools.js';
 
@@ -219,6 +220,23 @@ export function renderTechnical(ctx: PromptContext, opts: { now?: Date } = {}): 
   return substitute(technical, ctx, opts.now ?? new Date());
 }
 
+/** The selfie tool's usage section (prompts/selfie.txt), loaded lazily like the tools scaffold. */
+let selfieTemplate: string | undefined;
+
+/**
+ * Renders the selfie-tool section appended after the tools block — the "pictures of
+ * yourself" rules, call example, and the promise guard (see prompts/selfie.txt). Returns ''
+ * when the tool isn't currently offered (unconfigured or daily cap hit), so the model never
+ * reads rules for a tool it can't call.
+ */
+export function renderSelfieBlock(ctx: PromptContext, now: Date): string {
+  if (!isSelfieAvailable()) return '';
+  if (selfieTemplate === undefined) {
+    selfieTemplate = readFileSync(resolve(process.cwd(), config.selfie.toolPromptPath), 'utf8').trim();
+  }
+  return substitute(selfieTemplate, ctx, now);
+}
+
 export function renderSystemPrompt(
   ctx: PromptContext,
   opts: { now?: Date; includeMemory?: boolean } = {},
@@ -226,16 +244,18 @@ export function renderSystemPrompt(
   const { now = new Date(), includeMemory = true } = opts;
 
   // Persona + technical → facts (who the user is) → memory (recollections) → tools
-  // (capabilities/protocol). The facts and memory blocks are rendered per message, so /prompt
-  // and /context reflect the exact prompt the LLM sees. Unlike the memory block, facts are NOT
-  // dropped for proactive openers: they're timeless background rather than salient events, so
-  // the opener-fixation problem that exiled summaries doesn't apply (kept under watch). The
-  // order here is the single source of truth for the live payload, /prompt, and /dump alike —
-  // keep it in sync with renderToolsBlock's placement.
+  // (capabilities/protocol) → selfie rules. The facts and memory blocks are rendered per
+  // message, so /prompt and /context reflect the exact prompt the LLM sees. Unlike the memory
+  // block, facts are NOT dropped for proactive openers: they're timeless background rather
+  // than salient events, so the opener-fixation problem that exiled summaries doesn't apply
+  // (kept under watch). The order here is the single source of truth for the live payload,
+  // /prompt, and /dump alike — keep it in sync with renderToolsBlock's placement.
   const factsBlock = renderFactsBlock(ctx.chatId, ctx.userName);
   const memory = includeMemory ? renderMemoryBlock(ctx.chatId, ctx.userName) : '';
-  const tools = renderToolsBlock();
-  return [renderPersona(ctx, { now }), renderTechnical(ctx, { now }), factsBlock, memory, tools]
+  // The tools scaffold contains {{user}} too — substitute it like the other layers.
+  const tools = substitute(renderToolsBlock(), ctx, now);
+  const selfie = renderSelfieBlock(ctx, now);
+  return [renderPersona(ctx, { now }), renderTechnical(ctx, { now }), factsBlock, memory, tools, selfie]
     .filter(Boolean)
     .join('\n\n');
 }

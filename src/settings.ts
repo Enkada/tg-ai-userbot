@@ -21,6 +21,9 @@ const ROW_ID = 1;
  */
 let charName: string | null = null;
 
+/** In-memory mirror of the selfie-upscale toggle, same lifecycle as {@link charName}. */
+let imgUpscale = true;
+
 /**
  * Loads the global settings row, seeding it with column defaults on first run. Must be called
  * once at startup, after migrations. From then on the name is DB-owned — changed only via
@@ -31,7 +34,25 @@ export function initSettings(): void {
   db.insert(settings).values({ id: ROW_ID }).onConflictDoNothing().run();
   const row = db.select().from(settings).where(eq(settings.id, ROW_ID)).get();
   charName = row?.charName ?? DEFAULT_CHAR_NAME;
-  log.info(`Loaded settings (character name: "${charName}")`);
+  imgUpscale = row?.imgUpscale ?? true;
+  log.info(`Loaded settings (character name: "${charName}", selfie upscale: ${imgUpscale ? 'on' : 'off'})`);
+}
+
+/** Whether selfie generations run the 2× upscale pass. Changed via `/img upscale on|off`. */
+export function getImgUpscale(): boolean {
+  return imgUpscale;
+}
+
+/**
+ * Flips the selfie-upscale toggle. Returns the previous value, or null when it's already
+ * the requested one — a no-op the caller reports without writing.
+ */
+export function setImgUpscale(value: boolean): boolean | null {
+  if (value === imgUpscale) return null;
+  const prev = imgUpscale;
+  db.update(settings).set({ imgUpscale: value, updatedAt: Date.now() }).where(eq(settings.id, ROW_ID)).run();
+  imgUpscale = value;
+  return prev;
 }
 
 /** The active character name — the `{{char}}` tag value. Throws if {@link initSettings} hasn't run. */

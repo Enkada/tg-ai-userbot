@@ -99,6 +99,13 @@
       "when": 1784373918596,
       "tag": "0013_diary",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1784403456234,
+      "tag": "0014_daffy_vision",
+      "breakpoints": true
     }
   ]
 }

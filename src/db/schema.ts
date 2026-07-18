@@ -411,6 +411,12 @@ export const settings = sqliteTable('settings', {
   id: integer('id').primaryKey(),
   /** The character name substituted for the `{{char}}` tag. Changed via `/name`. */
   charName: text('char_name').notNull().default('Sara'),
+  /**
+   * Whether selfie generations run the 2× latent-upscale second pass (2560×1440 output).
+   * Off ⇒ single pass at base resolution — roughly half the time and cost, good for
+   * testing. Changed via `/img upscale on|off`.
+   */
+  imgUpscale: integer('img_upscale', { mode: 'boolean' }).notNull().default(true),
   /** Epoch ms of the last update. */
   updatedAt: integer('updated_at')
     .notNull()
@@ -418,3 +424,48 @@ export const settings = sqliteTable('settings', {
 });
 
 export type SettingsRow = typeof settings.$inferSelect;
+
+/**
+ * Selfie generations ("send_selfie" tool + /img gen): one row per attempted image, tied to
+ * the assistant message it was sent with (NULL for /img gen test runs and failures that
+ * never produced a message). The model's original prose prompt is what re-enters context
+ * (via {@link attachments}); everything else here is traceability — the exact tag prompt,
+ * seed, RunPod job id and timings — so a bad image can be traced to what was generated
+ * without guessing (the diaryPosts.cue pattern).
+ */
+export const photoGens = sqliteTable(
+  'photo_gens',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** Telegram chat (peer) id the generation belongs to (NULL for /img gen test runs). */
+    chatId: integer('chat_id'),
+    /** Owning assistant message row (messages.id), once the photo was sent. NULL until then. */
+    messageId: integer('message_id').references(() => messages.id),
+    /** The model's plain-prose description (the tool argument) — the semantic record. */
+    prose: text('prose').notNull(),
+    /** The booru-fied positive prompt actually sent to the generator (quality tags included). */
+    tags: text('tags').notNull(),
+    /** Base-pass seed (the upscale pass rolls its own; not stored). */
+    seed: integer('seed'),
+    /** Whether the 2× upscale second pass ran for this image. */
+    upscaled: integer('upscaled', { mode: 'boolean' }).notNull().default(true),
+    /** RunPod job id, for cross-referencing endpoint logs. */
+    jobId: text('job_id'),
+    /** RunPod queue delay / execution time (ms), from the job status. */
+    delayMs: integer('delay_ms'),
+    execMs: integer('exec_ms'),
+    /** 'ok' once the photo landed in the chat; 'failed' with `error` otherwise. */
+    status: text('status', { enum: ['ok', 'failed'] }).notNull(),
+    /** Failure reason (timeout, job error, send error) for failed rows. */
+    error: text('error'),
+    /** Local copy of the generated PNG (data/photos/…), when saved successfully. */
+    filePath: text('file_path'),
+    /** Epoch milliseconds. */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_photo_gens_chat').on(t.chatId, t.createdAt), index('idx_photo_gens_message').on(t.messageId)],
+);
+
+export type PhotoGenRow = typeof photoGens.$inferSelect;

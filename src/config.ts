@@ -329,6 +329,56 @@ export const config = {
     /** Per-request timeout (ms). Upstreams for this model ranged 1.5–40s in testing. */
     timeoutMs: numberEnv('FACTS_TIMEOUT_MS', 90_000),
   },
+  // ---- Selfies: the send_selfie tool — RunPod serverless ComfyUI image generation ----
+  selfie: {
+    /**
+     * RunPod credentials. Both must be set for the feature to exist at all — without them
+     * the tool is never offered, the selfie block never renders, and /img reports it off.
+     * Also requires `OPENROUTER_API_KEY`: the booru-fication pass always runs through
+     * OpenRouter (like summaries/facts), independent of the active chat provider.
+     */
+    runpodApiKey: process.env.RUNPOD_API_KEY?.trim() || undefined,
+    endpointId: process.env.RUNPOD_ENDPOINT_ID?.trim() || undefined,
+    /**
+     * Model slug for the booru-fication pass (prose → Danbooru tags). Deterministic-ish
+     * work: runs at low temperature with reasoning off (Baidu's default-on reasoning
+     * otherwise eats the whole token budget and returns empty content — tested 2026-07-18).
+     */
+    model: process.env.SELFIE_MODEL ?? 'deepseek/deepseek-v4-flash',
+    /** Low — tag conversion is mechanical; 0.6 was measurably flaky on rule adherence. */
+    temperature: numberEnv('SELFIE_TEMPERATURE', 0.3),
+    /** Cap on the tag line. Identity block + 35 scene tags measured ~250 tokens. */
+    maxTokens: numberEnv('SELFIE_MAX_TOKENS', 400),
+    /** App-owned booru-fication system prompt ({{identity}}/{{outfit_*}} filled from appearance). */
+    promptPath: process.env.SELFIE_PROMPT_PATH ?? 'prompts/booru.txt',
+    /** The selfie tool section appended to the system prompt when the tool is available. */
+    toolPromptPath: process.env.SELFIE_TOOL_PROMPT_PATH ?? 'prompts/selfie.txt',
+    /** Character appearance: identity tags, named outfit blocks, quality tags, negative. */
+    appearancePath: process.env.SELFIE_APPEARANCE_PATH ?? 'prompts/appearance.txt',
+    /** Checkpoint/LoRA filenames as they exist on the RunPod network volume. */
+    checkpoint: process.env.SELFIE_CHECKPOINT ?? 'waiIllustriousSDXL_v160.safetensors',
+    lora: process.env.SELFIE_LORA ?? 'ramdomrot_v2_illustrious_locon-000009.safetensors',
+    loraStrength: numberEnv('SELFIE_LORA_STRENGTH', 0.85),
+    /** Base latent size — portrait, phone-selfie shaped. The upscale pass doubles it. */
+    width: numberEnv('SELFIE_WIDTH', 720),
+    height: numberEnv('SELFIE_HEIGHT', 1280),
+    /**
+     * Total wall-clock budget for one generation (submit → image). Generous on purpose:
+     * a cold worker after idle measured 204s IN_QUEUE before 54s of execution.
+     */
+    timeoutMs: numberEnv('SELFIE_TIMEOUT_MS', 300_000),
+    /** Job status poll interval (ms). */
+    pollMs: numberEnv('SELFIE_POLL_MS', 4000),
+    /**
+     * Cap on conversation-driven generations per calendar day (tool calls + gate repairs;
+     * /img gen test runs don't count). Once hit, the tool is withheld from the prompt, so
+     * the model can't even try — not for the money (~$0.005/image) but so a misbehaving
+     * loop can't spam photos.
+     */
+    dailyCap: numberEnv('SELFIE_DAILY_CAP', 10),
+    /** Where generated PNGs are kept locally (traceability; photo_gens.filePath). */
+    photosDir: process.env.SELFIE_PHOTOS_DIR ?? 'data/photos',
+  },
   // ---- Diary: unprompted posts to the character's private channel ("the basement tapes") ----
   diary: {
     /**

@@ -47,6 +47,12 @@ export class ReplyStreamer {
   // Per-completion sniff state (reset by beginPass): is this pass prose or a tool call?
   private decided: 'unknown' | 'prose' | 'tool' = 'unknown';
   private pending = '';
+  // Prose-mode marker guard: holds back any stream tail that could be the start of a
+  // `<tool_call>` so a *trailing* call (send_selfie's "ack prose, then the call" shape)
+  // never leaks into a bubble. `truncated` = the marker was seen; everything after is
+  // control flow for the caller to parse from the full completion, not prose to show.
+  private guardBuf = '';
+  private truncated = false;
 
   /**
    * @param onFirstBubble Optional hook awaited once, right before the very first bubble is
@@ -83,13 +89,15 @@ export class ReplyStreamer {
   beginPass(): void {
     this.decided = 'unknown';
     this.pending = '';
+    this.guardBuf = '';
+    this.truncated = false;
   }
 
   /** Token sink passed to `chat()`: suppresses tool-call passes, streams prose as bubbles. */
   readonly onToken = async (delta: string): Promise<void> => {
     if (this.decided === 'tool') return;
     if (this.decided === 'prose') {
-      await this.feed(delta);
+      await this.feedGuarded(delta);
       return;
     }
     // Undecided: buffer until we can tell a tool call from prose by the leading characters.
@@ -105,8 +113,39 @@ export class ReplyStreamer {
     this.decided = 'prose';
     const buffered = this.pending;
     this.pending = '';
-    await this.feed(buffered);
+    await this.feedGuarded(buffered);
   };
+
+  /**
+   * Prose-mode feed with a rolling guard against a *mid-stream* `<tool_call>`: text is only
+   * released to the splitter once its tail can no longer be the start of the marker, and
+   * everything from a confirmed marker on is dropped (the caller parses the call from the
+   * full completion — see finalizeReply/parseToolCall). Without this, the send_selfie shape
+   * — an ack line followed by the call — would stream the raw tag into the chat.
+   */
+  private async feedGuarded(text: string): Promise<void> {
+    if (this.truncated) return;
+    this.guardBuf += text;
+    const idx = this.guardBuf.indexOf(TOOL_CALL_MARKER);
+    if (idx !== -1) {
+      this.truncated = true;
+      const safe = this.guardBuf.slice(0, idx);
+      this.guardBuf = '';
+      if (safe) await this.feed(safe);
+      return;
+    }
+    // Hold back the longest tail that is still a prefix of the marker; release the rest.
+    let hold = 0;
+    for (let k = Math.min(TOOL_CALL_MARKER.length - 1, this.guardBuf.length); k > 0; k--) {
+      if (this.guardBuf.endsWith(TOOL_CALL_MARKER.slice(0, k))) {
+        hold = k;
+        break;
+      }
+    }
+    const emit = this.guardBuf.slice(0, this.guardBuf.length - hold);
+    this.guardBuf = this.guardBuf.slice(this.guardBuf.length - hold);
+    if (emit) await this.feed(emit);
+  }
 
   /** Push prose text through the splitter, sending each completed bubble. */
   private async feed(text: string): Promise<void> {
@@ -154,8 +193,13 @@ export class ReplyStreamer {
   async finalize(finalText: string): Promise<number[]> {
     if (this.decided !== 'tool') {
       if (this.pending) {
-        await this.feed(this.pending);
+        await this.feedGuarded(this.pending);
         this.pending = '';
+      }
+      // A held-back marker prefix that never completed (reply just ends "…<tool") is prose.
+      if (!this.truncated && this.guardBuf) {
+        await this.feed(this.guardBuf);
+        this.guardBuf = '';
       }
       for (const bubble of this.splitter.flush()) await this.sendClean(bubble);
     }

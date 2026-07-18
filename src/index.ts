@@ -11,7 +11,14 @@ import { initSettings } from './settings.js';
 import { getLastMessageAt, rememberUserName, saveAttachment, saveMessage } from './memory.js';
 import { photoBeatMs, readDelayMs, readPauseMs, sleep } from './pacing.js';
 import { generateReply, persistedSearchStrategy } from './generate.js';
-import { finalizeReply } from './tools.js';
+import { finalizeReply, parseToolCall, stripToolCalls } from './tools.js';
+import {
+  ackLine,
+  isSelfieAvailable,
+  looksLikePhotoPromise,
+  maybeRepairPromise,
+  runSelfieFlow,
+} from './selfie.js';
 import { ReplyStreamer } from './send.js';
 import { withTyping } from './typing.js';
 import { enqueue } from './queue.js';
@@ -253,11 +260,24 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
         sink,
         controller.signal,
       );
+      // A send_selfie call ends the tool loop with the call still in the content (only
+      // web_search is fed back). Capture its prose argument; the photo flow runs after the
+      // ack reply below is sent and persisted.
+      const call = parseToolCall(result.content);
+      const selfieProse =
+        call?.name === 'send_selfie' && isSelfieAvailable()
+          ? String(call.arguments.prompt ?? '').trim()
+          : '';
       // Strip any leftover tool call (cap hit) so a raw tag never reaches the chat, then flush
       // the final bubble (or send the whole thing if nothing streamed, e.g. only a tool call).
-      const replyText = finalizeReply(result.content);
+      let replyText = finalizeReply(result.content);
+      if (selfieProse && !stripToolCalls(result.content).trim()) {
+        // A bare call with no ack prose of its own — finalizeReply would fall back to the
+        // search-flavored NO_ANSWER. Generate the "hang on" line instead (ephemeral cue).
+        replyText = await ackLine(systemPrompt, chatId, userName, selfieProse);
+      }
       const ids = await sink.finalize(replyText);
-      return { replyText, ids, model: result.model };
+      return { replyText, ids, model: result.model, selfieProse };
     });
     // Nothing reached the chat at all — fall through to the error path below.
     if (reply.ids.length === 0) throw new Error('Failed to send any part of the reply');
@@ -267,6 +287,24 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       provider: activeProviderId(),
       model: reply.model,
     });
+    // The photo itself: runs inside this same queue task, so messages arriving while it
+    // renders (~20-300s) simply queue behind — correct in-fiction, she's "taking the photo".
+    // Both calls handle their own failures; neither throws into the catch below (which would
+    // mis-treat the already-sent reply as failed).
+    if (reply.selfieProse) {
+      await runSelfieFlow({
+        client,
+        peer: msg.chat,
+        chatId,
+        userName,
+        systemPrompt,
+        prose: reply.selfieProse,
+      });
+    } else if (looksLikePhotoPromise(reply.replyText)) {
+      // No call, but the reply reads like "gimme a sec, i'll send a pic" — run the promise
+      // gate: an LLM reread whose output is discarded unless it parses as a valid call.
+      await maybeRepairPromise({ client, peer: msg.chat, chatId, userName, systemPrompt });
+    }
   } catch (err) {
     // A user /stop aborts the model call with an AbortError (a timeout/real failure does not) —
     // that's an intentional halt, not an error: keep the partial silently, never apologize.

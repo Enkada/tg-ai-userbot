@@ -1,16 +1,17 @@
-import { and, asc, count, desc, eq, gte, inArray, lt } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, lt } from 'drizzle-orm';
 import { db } from './db/index.js';
 import {
   attachments,
   facts,
   factsState,
   messages,
+  photoGens,
   proactiveState,
   searches,
   summaries,
   summaryState,
 } from './db/schema.js';
-import type { FactCategory, FactRow, FactsStateRow, ProactiveStateRow, SummaryStateRow } from './db/schema.js';
+import type { FactCategory, FactRow, FactsStateRow, PhotoGenRow, ProactiveStateRow, SummaryStateRow } from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
 import { sanitize } from './sanitize.js';
@@ -273,14 +274,24 @@ function chatUserName(chatId: number): string {
  * The event phrasing ("X sent a photo") over a bare `[image: …]` tag is deliberate: the
  * assistant would never say that about itself, which measurably stops the model from
  * opening its reply with a copy of the block (tested 1/10 → 0/10 echo on meme photos).
+ *
+ * Assistant rows are the bot's own selfies (see selfie.ts): the caption is the model's
+ * original prose prompt and the block reads `[you sent a photo: …]` — second person, like
+ * the search blocks, so the model knows the picture is its own and doesn't react to it.
  */
-function withCaptions(content: string, captions: string[], userName: string): string {
+function withCaptions(
+  content: string,
+  captions: string[],
+  userName: string,
+  role: 'user' | 'assistant' = 'user',
+): string {
   if (captions.length === 0) return content;
+  const who = role === 'assistant' ? 'you' : userName;
   const blocks = captions
     .map((c, i) =>
       captions.length === 1
-        ? `[${userName} sent a photo: ${c}]`
-        : `[${userName} sent photo ${i + 1}: ${c}]`,
+        ? `[${who} sent a photo: ${c}]`
+        : `[${who} sent photo ${i + 1}: ${c}]`,
     )
     .join('\n');
   // Photo-only messages have empty content — then the blocks are the whole turn.
@@ -387,7 +398,7 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
     // tells in model-written captions / external search text — reach the LLM in plain form too.
     content: sanitize(
       withSearches(
-        withCaptions(content, captionsByMessage.get(id) ?? [], userName),
+        withCaptions(content, captionsByMessage.get(id) ?? [], userName, role),
         searchesByMessage.get(id) ?? [],
       ),
     ),
@@ -524,7 +535,7 @@ export function getDayMessages(chatId: number, start: number, end: number): DayM
     // Same window-build cleanup as getWindow: hand the day readers plain-keyboard text.
     content: sanitize(
       withSearches(
-        withCaptions(content, captionsByMessage.get(id) ?? [], userName),
+        withCaptions(content, captionsByMessage.get(id) ?? [], userName, role),
         searchesByMessage.get(id) ?? [],
       ),
     ),
@@ -738,4 +749,60 @@ export function setFactsCursor(chatId: number, lastDoneStart: number): void {
     .values({ chatId, lastDoneStart, updatedAt: now })
     .onConflictDoUpdate({ target: factsState.chatId, set: { lastDoneStart, updatedAt: now } })
     .run();
+}
+
+// ---- Selfie generations (the send_selfie tool) -------------------------------------------
+
+/** Writable fields of one selfie generation record (see {@link photoGens}). */
+export interface PhotoGenPatch {
+  chatId?: number;
+  messageId?: number;
+  prose: string;
+  tags: string;
+  seed?: number;
+  upscaled: boolean;
+  jobId?: string;
+  delayMs?: number;
+  execMs?: number;
+  status: 'ok' | 'failed';
+  error?: string;
+  filePath?: string;
+}
+
+/** Records one selfie generation attempt (success or failure). Returns the new row's id. */
+export function savePhotoGen(gen: PhotoGenPatch): number {
+  const row = db.insert(photoGens).values(gen).returning({ id: photoGens.id }).get();
+  return row.id;
+}
+
+/**
+ * Conversation-driven generation attempts (tool calls + gate repairs — rows with a chatId;
+ * /img gen test runs carry none) since local midnight. Feeds the daily cap: failed attempts
+ * count too, so a broken endpoint can't burn unlimited retries.
+ */
+export function photosToday(): number {
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  const row = db
+    .select({ c: count() })
+    .from(photoGens)
+    .where(and(isNotNull(photoGens.chatId), gte(photoGens.createdAt, midnight.getTime())))
+    .get();
+  return row?.c ?? 0;
+}
+
+/** Whether a message row has a selfie generation attached — the /r //u //t photo-turn guard. */
+export function hasPhotoGen(messageId: number): boolean {
+  const row = db
+    .select({ id: photoGens.id })
+    .from(photoGens)
+    .where(eq(photoGens.messageId, messageId))
+    .limit(1)
+    .get();
+  return row !== undefined;
+}
+
+/** The most recent selfie generation record (any chat, test runs included), for /img status. */
+export function lastPhotoGen(): PhotoGenRow | null {
+  return db.select().from(photoGens).orderBy(desc(photoGens.id)).limit(1).get() ?? null;
 }

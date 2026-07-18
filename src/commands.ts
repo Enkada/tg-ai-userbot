@@ -1,4 +1,4 @@
-import { html, md, type InputText, type Message, type TelegramClient } from '@mtcute/node';
+import { html, md, InputMedia, type InputText, type Message, type TelegramClient } from '@mtcute/node';
 import { encode } from 'gpt-tokenizer';
 import { config } from './config.js';
 import {
@@ -31,8 +31,12 @@ import {
   getWindow,
   getWindowDetailed,
   getWindowInfo,
+  hasPhotoGen,
+  lastPhotoGen,
   messageCount,
+  photosToday,
   resetMemory,
+  savePhotoGen,
   summaryCount,
   updateMessageContent,
   upsertProactiveState,
@@ -41,9 +45,10 @@ import {
 } from './memory.js';
 import { FACT_CATEGORIES, type FactCategory } from './db/schema.js';
 import { withReplyCue } from './generate.js';
-import { forgetDebris } from './panel.js';
+import { forgetDebris, trackDebris } from './panel.js';
+import { endpointHealth, generateSelfie, isSelfieConfigured, savePng } from './selfie.js';
 import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
-import { getCharName, normalizeCharName, setCharName } from './settings.js';
+import { getCharName, getImgUpscale, normalizeCharName, setCharName, setImgUpscale } from './settings.js';
 import { formatDateTime, renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
@@ -326,6 +331,11 @@ register({
       await reply('Cannot trim — this reply predates message-id tracking.');
       return;
     }
+    // A photo turn is one photo message, not text bubbles — nothing to trim off it.
+    if (hasPhotoGen(last.id)) {
+      await reply(md('Cannot trim a photo message — use `/d 1` to remove it.'));
+      return;
+    }
 
     // Re-split the stored reply into the same bubbles it was sent as. The split is deterministic
     // and idempotent with sanitize, so an ordinary streamed reply re-splits to exactly its stored
@@ -422,6 +432,13 @@ register({
       await reply('Cannot reroll — this reply predates message-id tracking.');
       return;
     }
+    // Rerolling a photo turn would revoke the image and answer with text — blocked in v1 so
+    // an image can't be lost by habit. (A future /r-on-photo could re-run the same tag
+    // prompt with a fresh seed instead; the guard lives here, not in the shared machinery.)
+    if (hasPhotoGen(last.id)) {
+      await reply(md('Cannot reroll a photo message — use `/d 1` to remove it, or ask her for another pic.'));
+      return;
+    }
     // Only reroll when the assistant reply is genuinely the last turn. If a newer user
     // message exists, regenerating would answer that one but overwrite the older reply.
     if (getLastRole(chatId) !== 'assistant') {
@@ -504,6 +521,11 @@ register({
     }
     if (last.tgMessageIds === null) {
       await reply('Cannot update — this reply predates message-id tracking.');
+      return;
+    }
+    // Replacing a photo turn with text would silently destroy the image — blocked in v1.
+    if (hasPhotoGen(last.id)) {
+      await reply(md('Cannot update a photo message — use `/d 1` to remove it.'));
       return;
     }
 
@@ -592,6 +614,125 @@ register({
         : '\n\nNo postable channels found — create one from this account first.';
     }
     await reply(md(`📓 **Diary**\n${body}`));
+  },
+});
+
+/** The `/img` help: the action menu. */
+const IMG_HELP = md(`**📸 /img** — selfie generation (the send_selfie tool)
+\`/img\` — status: endpoint health, today's count, last generation
+\`/img upscale on|off\` — toggle the 2× upscale pass (off = ~half the time/cost, for testing)
+\`/img gen <prose>\` — test the pipeline directly: prose → booru tags → image (doesn't touch the conversation or the daily cap)`);
+
+register({
+  name: 'img',
+  description: "Selfie generation: /img (status) · upscale on|off · gen <prose>",
+  handler: async ({ client, msg, reply, chatId, args, rawArgs }) => {
+    const sub = args[0]?.toLowerCase();
+
+    if (sub === 'upscale') {
+      const arg = args[1]?.toLowerCase();
+      if (arg !== 'on' && arg !== 'off') {
+        await reply(IMG_HELP);
+        return;
+      }
+      const value = arg === 'on';
+      const prev = setImgUpscale(value);
+      const desc = value
+        ? `**on** — 2× second pass, ${config.selfie.width * 2}×${config.selfie.height * 2}`
+        : `**off** — single pass, ${config.selfie.width}×${config.selfie.height}`;
+      await reply(md(prev === null ? `Upscale already ${desc}.` : `✅ Upscale ${desc}.`));
+      return;
+    }
+
+    if (sub === 'gen') {
+      const prose = rawArgs.slice(3).trim();
+      if (!prose) {
+        await reply(IMG_HELP);
+        return;
+      }
+      if (!isSelfieConfigured()) {
+        await reply(md('📸 Not configured — set `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID` and `OPENROUTER_API_KEY`.'));
+        return;
+      }
+      await reply(md(`📸 Generating (upscale ${getImgUpscale() ? 'on' : 'off'})… this can take a few minutes on a cold worker.`));
+      try {
+        const gen = await generateSelfie(prose);
+        const filePath = savePng(gen.buffer);
+        // A test image is command output, not conversation: tracked as `file` debris (like
+        // /dump), no message row, no attachment — the model never learns it happened.
+        const sent = await client.sendMedia(
+          msg.chat,
+          InputMedia.photo(gen.buffer, {
+            caption: md(
+              `📸 delay ${((gen.delayMs ?? 0) / 1000).toFixed(1)}s · exec ${((gen.execMs ?? 0) / 1000).toFixed(1)}s · seed \`${gen.seed}\` · upscale ${gen.upscaled ? 'on' : 'off'}`,
+            ),
+          }),
+        );
+        trackDebris(chatId, sent.id, 'file');
+        savePhotoGen({
+          prose,
+          tags: gen.tags,
+          seed: gen.seed,
+          upscaled: gen.upscaled,
+          jobId: gen.jobId,
+          delayMs: gen.delayMs,
+          execMs: gen.execMs,
+          status: 'ok',
+          filePath: filePath ?? undefined,
+        });
+        // The panel gets the exact tag prompt, so a bad image is diagnosable on the spot.
+        const MAX = 3500;
+        const tags = gen.tags.length > MAX ? `${gen.tags.slice(0, MAX)}…` : gen.tags;
+        await reply(html`📸 Done. Tags:<br><pre>${tags}</pre>`);
+      } catch (err) {
+        savePhotoGen({ prose, tags: '', upscaled: getImgUpscale(), status: 'failed', error: String(err).slice(0, 500) });
+        await reply(md(`⚠️ Generation failed: ${String(err).slice(0, 300)}`));
+      }
+      return;
+    }
+
+    if (sub !== undefined) {
+      await reply(IMG_HELP);
+      return;
+    }
+
+    // Status.
+    if (!isSelfieConfigured()) {
+      await reply(
+        md('📸 **Selfies** — not configured.\nNeeds `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID` and `OPENROUTER_API_KEY` in `.env`.'),
+      );
+      return;
+    }
+    const [health, today] = [await endpointHealth(), photosToday()];
+    const w = health?.workers;
+    const healthLine = w
+      ? `ready ${w.ready} · running ${w.running} · initializing ${w.initializing} · throttled ${w.throttled}` +
+        (health.jobs.inQueue ? ` · ⚠️ ${health.jobs.inQueue} queued` : '')
+      : 'unreachable ❌';
+    const upscale = getImgUpscale();
+    const sizeStr = upscale
+      ? `${config.selfie.width * 2}×${config.selfie.height * 2} (upscale on)`
+      : `${config.selfie.width}×${config.selfie.height} (upscale off)`;
+
+    const last = lastPhotoGen();
+    let lastLine = 'none yet';
+    if (last) {
+      const status = last.status === 'ok' ? '✅' : `❌ ${last.error ?? 'failed'}`;
+      const timing =
+        last.execMs != null ? ` · delay ${((last.delayMs ?? 0) / 1000).toFixed(0)}s exec ${(last.execMs / 1000).toFixed(0)}s` : '';
+      const kind = last.chatId == null ? ' · test' : '';
+      lastLine = `${formatDateTime(last.createdAt)} ${status}${timing}${kind}\n"${last.prose.slice(0, 120)}"`;
+    }
+
+    await reply(
+      md(`**📸 Selfies**
+Endpoint: **${config.selfie.endpointId}** · ${healthLine}
+Today: **${today}/${config.selfie.dailyCap}** · Output: **${sizeStr}**
+Booru model: \`${config.selfie.model}\`
+
+**Last generation**
+${lastLine}`),
+    );
   },
 });
 

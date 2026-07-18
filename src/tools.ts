@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { isSearchConfigured } from './search.js';
+import { isSelfieAvailable } from './selfie.js';
 
 /** A tool the model may call via the pseudo protocol. */
 export interface ToolDef {
@@ -36,7 +37,20 @@ const WEB_SEARCH: ToolDef = {
   available: isSearchConfigured,
 };
 
-const ALL_TOOLS: ToolDef[] = [WEB_SEARCH];
+/**
+ * The selfie tool — gated on RunPod + OpenRouter being configured and the daily cap not yet
+ * hit (see selfie.ts). Its usage rules live in their own prompt section (prompts/selfie.txt,
+ * appended in prompt.ts), not in this one-liner. The arrow (not a direct reference) keeps
+ * the tools ↔ selfie import cycle safe at module-init time.
+ */
+const SEND_SELFIE: ToolDef = {
+  name: 'send_selfie',
+  args: ['prompt'],
+  description: 'make and send a picture of yourself',
+  available: () => isSelfieAvailable(),
+};
+
+const ALL_TOOLS: ToolDef[] = [WEB_SEARCH, SEND_SELFIE];
 
 /** Tools currently usable. Empty ⇒ no tool block is rendered and parsing is skipped. */
 export function availableTools(): ToolDef[] {

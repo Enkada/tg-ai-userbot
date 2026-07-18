@@ -312,6 +312,34 @@ export async function factsPass(systemPrompt: string, userMessage: string): Prom
 }
 
 /**
+ * One-shot booru-fication call, used by the selfie flow (selfie.ts): converts the model's
+ * plain-prose picture description into the Danbooru tag prompt the image generator takes.
+ * Same shape and rationale as {@link factsPass}: dedicated model ({@link config.selfie.model}),
+ * non-streaming, no tools, no chat {@link PROVIDER_ROUTING}, reasoning off (essential — with
+ * reasoning on, Baidu's upstream burns the whole token budget on hidden chain-of-thought and
+ * returns empty content). Throws if OpenRouter isn't configured or the call fails.
+ */
+export async function booruPass(systemPrompt: string, prose: string): Promise<string> {
+  if (!cfg.apiKey) throw new Error('Selfie generation requires OpenRouter (OPENROUTER_API_KEY is missing)');
+  const { content } = await openaiChatCompletionStream({
+    url: CHAT_URL,
+    headers: authHeaders(),
+    model: config.selfie.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prose },
+    ],
+    temperature: config.selfie.temperature,
+    maxTokens: config.selfie.maxTokens,
+    timeoutMs: config.summary.timeoutMs,
+    extraBody: { reasoning: { enabled: false } },
+    label: 'Booru pass',
+    dispatcher,
+  });
+  return content;
+}
+
+/**
  * One-shot diary-entry call, used by the diary scheduler (diary.ts). Runs on the *chat*
  * model — the entry must be written in the same voice as the chat, so unlike
  * {@link summarize}/{@link factsPass} it keeps the chat slug, the chat-tuned
