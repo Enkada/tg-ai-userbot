@@ -111,13 +111,15 @@ export const config = {
      * (persona_versions, edited via /persona) and this file is read once to seed the table
      * when it's empty — so a pre-DB install keeps its tweaked persona. Never written.
      */
-    personaPromptPath: process.env.PERSONA_PROMPT_PATH ?? 'prompts/persona.txt',
+    personaPromptPath: process.env.PERSONA_PROMPT_PATH ?? 'prompts/system/persona.txt',
     /** Shipped default persona: the first-run seed (when no legacy file exists) and the source for /persona default. */
-    personaDefaultPath: 'prompts/persona.default.txt',
+    personaDefaultPath: 'prompts/system/persona.default.txt',
+    /** App-owned appearance layer: the character's actual look, referenced by persona and selfies alike. */
+    appearancePromptPath: 'prompts/system/appearance.txt',
     /** App-owned technical layer (current app limits + dynamic context). Evolves with features; never user-copied. */
-    technicalPromptPath: 'prompts/technical.txt',
+    technicalPromptPath: 'prompts/system/technical.txt',
     /** App-owned tool-protocol scaffold; its {{tools}} tag is filled with the available-tools list. */
-    toolsPromptPath: 'prompts/tools.txt',
+    toolsPromptPath: 'prompts/tools/tools.txt',
     // ---- Shared generation params (apply to whichever provider is active) ----
     temperature: numberEnv('LLM_TEMPERATURE', 0.7),
     maxTokens: numberEnv('LLM_MAX_TOKENS', 512),
@@ -280,7 +282,7 @@ export const config = {
      */
     model: process.env.SUMMARY_MODEL ?? 'deepseek/deepseek-v4-flash',
     /** App-owned summarizer system prompt (first-person diary voice). */
-    promptPath: process.env.SUMMARY_PROMPT_PATH ?? 'prompts/summary.txt',
+    promptPath: process.env.SUMMARY_PROMPT_PATH ?? 'prompts/passes/summary.txt',
     /** A logical day is only summarized when it holds MORE than this many non-deleted messages. */
     minMessages: numberEnv('SUMMARY_MIN_MESSAGES', 10),
     /** How many of the newest daily summaries are injected into the system prompt. */
@@ -313,7 +315,7 @@ export const config = {
      */
     model: process.env.FACTS_MODEL ?? 'deepseek/deepseek-v4-flash',
     /** App-owned diff-pass system prompt (extract+merge rules and the JSON op format). */
-    promptPath: process.env.FACTS_PROMPT_PATH ?? 'prompts/facts.txt',
+    promptPath: process.env.FACTS_PROMPT_PATH ?? 'prompts/passes/facts.txt',
     /**
      * A logical day is scanned when it holds MORE than this many non-deleted messages.
      * Deliberately lower than the summary threshold — a three-message day can still carry
@@ -350,11 +352,11 @@ export const config = {
     /** Cap on the tag line. Identity block + 35 scene tags measured ~250 tokens. */
     maxTokens: numberEnv('SELFIE_MAX_TOKENS', 400),
     /** App-owned booru-fication system prompt ({{identity}}/{{outfit_*}} filled from appearance). */
-    promptPath: process.env.SELFIE_PROMPT_PATH ?? 'prompts/booru.txt',
+    promptPath: process.env.SELFIE_PROMPT_PATH ?? 'prompts/passes/booru.txt',
     /** The selfie tool section appended to the system prompt when the tool is available. */
-    toolPromptPath: process.env.SELFIE_TOOL_PROMPT_PATH ?? 'prompts/selfie.txt',
-    /** Character appearance: identity tags, named outfit blocks, quality tags, negative. */
-    appearancePath: process.env.SELFIE_APPEARANCE_PATH ?? 'prompts/appearance.txt',
+    toolPromptPath: process.env.SELFIE_TOOL_PROMPT_PATH ?? 'prompts/tools/selfie.txt',
+    /** Generator-side appearance: identity tags, named outfit blocks, quality tags, negative. */
+    appearancePath: process.env.SELFIE_APPEARANCE_PATH ?? 'prompts/passes/booru-appearance.txt',
     /** Checkpoint/LoRA filenames as they exist on the RunPod network volume. */
     checkpoint: process.env.SELFIE_CHECKPOINT ?? 'waiIllustriousSDXL_v160.safetensors',
     lora: process.env.SELFIE_LORA ?? 'ramdomrot_v2_illustrious_locon-000009.safetensors',
@@ -370,12 +372,10 @@ export const config = {
     /** Job status poll interval (ms). */
     pollMs: numberEnv('SELFIE_POLL_MS', 4000),
     /**
-     * Cap on conversation-driven generations per calendar day (tool calls + gate repairs;
-     * /img gen test runs don't count). Once hit, the tool is withheld from the prompt, so
-     * the model can't even try — not for the money (~$0.005/image) but so a misbehaving
-     * loop can't spam photos.
+     * Per-request timeout for the selfie feature's own LLM calls (the booru pass). Its own
+     * knob — it used to borrow SUMMARY_TIMEOUT_MS, which silently coupled the two features.
      */
-    dailyCap: numberEnv('SELFIE_DAILY_CAP', 10),
+    llmTimeoutMs: numberEnv('SELFIE_LLM_TIMEOUT_MS', 60_000),
     /** Where generated PNGs are kept locally (traceability; photo_gens.filePath). */
     photosDir: process.env.SELFIE_PHOTOS_DIR ?? 'data/photos',
   },
@@ -422,9 +422,9 @@ export const config = {
     /** How many random spark words are offered per entry (from prompts/diary-words.txt). */
     sparkCount: numberEnv('DIARY_SPARKS', 8),
     /** App-owned diary instruction layer (what the channel is, how she writes there). */
-    promptPath: process.env.DIARY_PROMPT_PATH ?? 'prompts/diary.txt',
+    promptPath: process.env.DIARY_PROMPT_PATH ?? 'prompts/passes/diary.txt',
     /** Curated spark-word list, one word/phrase per line. */
-    wordsPath: process.env.DIARY_WORDS_PATH ?? 'prompts/diary-words.txt',
+    wordsPath: process.env.DIARY_WORDS_PATH ?? 'prompts/passes/diary-words.txt',
   },
 } as const;
 

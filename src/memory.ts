@@ -15,6 +15,7 @@ import type { FactCategory, FactRow, FactsStateRow, PhotoGenRow, ProactiveStateR
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
 import { sanitize } from './sanitize.js';
+import { getCharName } from './settings.js';
 
 /** Minimum number of recent messages always kept in the context window. */
 export const MIN_WINDOW = 60;
@@ -269,24 +270,19 @@ function chatUserName(chatId: number): string {
 }
 
 /**
- * Renders a message's image captions as `[<user> sent a photo: …]` block(s), prepended above
- * its text; multiple are numbered `[<user> sent photo 1: …]`, `[<user> sent photo 2: …]`.
+ * Renders a message's image captions as `[<who> sent a photo: …]` block(s), prepended above
+ * its text; multiple are numbered `[<who> sent photo 1: …]`, `[<who> sent photo 2: …]`.
  * The event phrasing ("X sent a photo") over a bare `[image: …]` tag is deliberate: the
  * assistant would never say that about itself, which measurably stops the model from
  * opening its reply with a copy of the block (tested 1/10 → 0/10 echo on meme photos).
  *
- * Assistant rows are the bot's own selfies (see selfie.ts): the caption is the model's
- * original prose prompt and the block reads `[you sent a photo: …]` — second person, like
- * the search blocks, so the model knows the picture is its own and doesn't react to it.
+ * `who` is the sender's display name: the user's name for their photo rows everywhere, and
+ * the character's own name for the bot's selfie rows in the *day transcripts* (summarizer,
+ * facts, diary — they read the chat as a named transcript). The live window renders selfie
+ * rows very differently — see {@link renderSelfieWindowTurns}.
  */
-function withCaptions(
-  content: string,
-  captions: string[],
-  userName: string,
-  role: 'user' | 'assistant' = 'user',
-): string {
+function withCaptions(content: string, captions: string[], who: string): string {
   if (captions.length === 0) return content;
-  const who = role === 'assistant' ? 'you' : userName;
   const blocks = captions
     .map((c, i) =>
       captions.length === 1
@@ -296,6 +292,48 @@ function withCaptions(
     .join('\n');
   // Photo-only messages have empty content — then the blocks are the whole turn.
   return content ? `${blocks}\n${content}` : blocks;
+}
+
+/**
+ * The prompt builder owns square brackets: bracketed blocks in model *input* are system
+ * records it composes (photo captions, search results, `[photo sent]` acks), so any bracket
+ * block the assistant itself wrote — a `[you sent a photo: …]` imitation, or any other
+ * annotation-shaped text — is stripped from its turns at window-build time. The chat and the
+ * DB keep the raw text (nothing the user saw is rewritten); only what the model is fed back
+ * is cleaned, because an in-window exemplar of the imitation measurably re-teaches it
+ * (11/24 imitation with two blocks in context vs 0/16 with none, 2026-07-24).
+ */
+function stripModelBrackets(text: string): string {
+  return text
+    .replace(/[ \t]*\[[^\]]*\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Renders one of the bot's own selfie rows as live-window turns showing the *protocol that
+ * actually happened* instead of a narrated record: the verbatim `send_selfie` tool call
+ * (its `prompt` carries the prose, so grounding survives), a minimal `[photo sent]`
+ * user-role ack — the same side of the role boundary as the search-result records — and the
+ * caption as the following assistant turn. Measured against the old
+ * `[you sent a photo: …]` block rendering (2026-07-24): bracket imitation on a follow-up
+ * photo ask fell from 11/24 to 0/16, with zero spurious calls on casual turns and zero
+ * echoes of the ack. Keep the ack worded exactly `[photo sent]` — longer variants drift
+ * back toward the imitable narrated shape.
+ */
+export function renderSelfieWindowTurns(
+  caption: string,
+  proses: string[],
+): { role: 'user' | 'assistant'; content: string }[] {
+  const calls = proses
+    .map((p) => `<tool_call>${JSON.stringify({ name: 'send_selfie', arguments: { prompt: p } })}</tool_call>`)
+    .join('\n');
+  const turns: { role: 'user' | 'assistant'; content: string }[] = [
+    { role: 'assistant', content: calls },
+    { role: 'user', content: '[photo sent]' },
+  ];
+  if (caption) turns.push({ role: 'assistant', content: caption });
+  return turns;
 }
 
 /** One search's query + distilled summary, for injecting into the window. */
@@ -391,21 +429,32 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
   }
 
   const userName = chatUserName(chatId);
-  return rows.map(({ id, role, content, createdAt, model, proactive }) => ({
-    role,
+  return rows.flatMap(({ id, role, content, createdAt, model, proactive }) => {
+    const meta = { at: createdAt, model: model ?? null, proactive };
+    const captions = captionsByMessage.get(id) ?? [];
+    const searchList = searchesByMessage.get(id) ?? [];
+    if (role === 'assistant') {
+      // The model's own turns come back bracket-free: only the builder writes brackets into
+      // model input (see stripModelBrackets). A selfie row expands into the protocol turns
+      // that produced it (tool call → [photo sent] → caption), so the window demonstrates
+      // the correct call shape instead of a narrated record it would imitate.
+      const clean = stripModelBrackets(content);
+      if (captions.length > 0) {
+        return renderSelfieWindowTurns(sanitize(clean), captions).map((t) => ({ ...t, ...meta }));
+      }
+      return [{ role, content: sanitize(withSearches(clean, searchList)), ...meta }];
+    }
     // Captions precede the text; search results follow it. Sanitize the composed turn (window-
     // build seam of the cleanup) so legacy rows from before the feature — and the typographic
     // tells in model-written captions / external search text — reach the LLM in plain form too.
-    content: sanitize(
-      withSearches(
-        withCaptions(content, captionsByMessage.get(id) ?? [], userName, role),
-        searchesByMessage.get(id) ?? [],
-      ),
-    ),
-    at: createdAt,
-    model: model ?? null,
-    proactive,
-  }));
+    return [
+      {
+        role,
+        content: sanitize(withSearches(withCaptions(content, captions, userName), searchList)),
+        ...meta,
+      },
+    ];
+  });
 }
 
 /** Returns the current context window (oldest → newest) for a chat, as the LLM receives it. */
@@ -529,13 +578,20 @@ export function getDayMessages(chatId: number, start: number, end: number): DayM
   }
 
   const userName = chatUserName(chatId);
+  const charName = getCharName();
   return rows.map(({ id, role, content, createdAt }) => ({
     role,
     at: createdAt,
-    // Same window-build cleanup as getWindow: hand the day readers plain-keyboard text.
+    // Same window-build cleanup as getWindow (incl. the assistant bracket strip), but the day
+    // readers see a named transcript, not the live protocol — so a selfie row stays a narrated
+    // `[<char> sent a photo: …]` block here instead of the window's tool-call expansion.
     content: sanitize(
       withSearches(
-        withCaptions(content, captionsByMessage.get(id) ?? [], userName, role),
+        withCaptions(
+          role === 'assistant' ? stripModelBrackets(content) : content,
+          captionsByMessage.get(id) ?? [],
+          role === 'assistant' ? charName : userName,
+        ),
         searchesByMessage.get(id) ?? [],
       ),
     ),

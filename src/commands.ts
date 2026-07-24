@@ -12,9 +12,11 @@ import {
   type ChatResult,
 } from './llm.js';
 import {
+  renderAppearance,
   renderFactsBlock,
   renderMemoryBlock,
   renderPersona,
+  renderSelfieBlock,
   renderSystemPrompt,
   renderTechnical,
 } from './prompt.js';
@@ -46,13 +48,21 @@ import {
 import { FACT_CATEGORIES, type FactCategory } from './db/schema.js';
 import { withReplyCue } from './generate.js';
 import { forgetDebris, trackDebris } from './panel.js';
-import { endpointHealth, generateSelfie, isSelfieConfigured, savePng } from './selfie.js';
+import {
+  ackLine,
+  endpointHealth,
+  generateSelfie,
+  isSelfieAvailable,
+  isSelfieConfigured,
+  runSelfieFlow,
+  savePng,
+} from './selfie.js';
 import { getPersona, resetPersona, setPersona, undoPersona } from './persona.js';
 import { getCharName, getImgUpscale, normalizeCharName, setCharName, setImgUpscale } from './settings.js';
 import { formatDateTime, renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
-import { finalizeReply, renderToolsBlock } from './tools.js';
+import { finalizeReply, parseToolCall, renderToolsBlock, stripToolCalls } from './tools.js';
 import { ReplyStreamer } from './send.js';
 import { splitMessage } from './chunker.js';
 import { stopInFlight } from './inflight.js';
@@ -484,9 +494,19 @@ register({
       regenerated = { content: streamer.streamedText, model: null };
     }
 
-    // Reroll doesn't run the search loop, so strip any tool call the model emits rather
-    // than leak a raw tag into the chat (the stored search blocks still ground the reply).
-    const regenText = finalizeReply(regenerated.content);
+    // A send_selfie call IS executed on reroll — a rerolled "no-tool" text reply can come
+    // back as ack + call → photo. Only web_search stays stripped here (reroll doesn't run
+    // the search loop; the stored search blocks still ground the reply).
+    const call = parseToolCall(regenerated.content);
+    const selfieProse =
+      isSelfieAvailable() && call?.name === 'send_selfie'
+        ? String(call.arguments.prompt ?? '').trim()
+        : '';
+    let regenText = finalizeReply(regenerated.content);
+    if (selfieProse && !stripToolCalls(regenerated.content).trim()) {
+      // A bare call leaves no prose to show — generate the "hang on" line instead.
+      regenText = await ackLine(systemPrompt, chatId, userName, selfieProse);
+    }
     const newIds = await streamer.finalize(regenText);
     if (newIds.length === 0) {
       await reply('⚠️ Could not send the rerolled reply.');
@@ -500,6 +520,10 @@ register({
       { provider: activeProviderId(), model: regenerated.model },
       newIds,
     );
+    // The photo itself, after the ack row is in place — same order as the reactive flow.
+    if (selfieProse) {
+      await runSelfieFlow({ client, peer: msg.chat, chatId, userName, systemPrompt, prose: selfieProse });
+    }
   },
 });
 
@@ -621,7 +645,7 @@ register({
 const IMG_HELP = md(`**📸 /img** — selfie generation (the send_selfie tool)
 \`/img\` — status: endpoint health, today's count, last generation
 \`/img upscale on|off\` — toggle the 2× upscale pass (off = ~half the time/cost, for testing)
-\`/img gen <prose>\` — test the pipeline directly: prose → booru tags → image (doesn't touch the conversation or the daily cap)`);
+\`/img gen <prose>\` — test the pipeline directly: prose → booru tags → image (doesn't touch the conversation)`);
 
 register({
   name: 'img',
@@ -680,10 +704,11 @@ register({
           status: 'ok',
           filePath: filePath ?? undefined,
         });
-        // The panel gets the exact tag prompt, so a bad image is diagnosable on the spot.
-        const MAX = 3500;
+        // The panel gets the prose next to the exact tag prompt it became, so a bad image
+        // is diagnosable on the spot.
+        const MAX = 3300;
         const tags = gen.tags.length > MAX ? `${gen.tags.slice(0, MAX)}…` : gen.tags;
-        await reply(html`📸 Done. Tags:<br><pre>${tags}</pre>`);
+        await reply(html`📸 Done.<br>Prose: <i>${prose.slice(0, 400)}</i><br>Tags:<br><pre>${tags}</pre>`);
       } catch (err) {
         savePhotoGen({ prose, tags: '', upscaled: getImgUpscale(), status: 'failed', error: String(err).slice(0, 500) });
         await reply(md(`⚠️ Generation failed: ${String(err).slice(0, 300)}`));
@@ -721,13 +746,16 @@ register({
       const timing =
         last.execMs != null ? ` · delay ${((last.delayMs ?? 0) / 1000).toFixed(0)}s exec ${(last.execMs / 1000).toFixed(0)}s` : '';
       const kind = last.chatId == null ? ' · test' : '';
-      lastLine = `${formatDateTime(last.createdAt)} ${status}${timing}${kind}\n"${last.prose.slice(0, 120)}"`;
+      // Prose (the model's request) and the booru tags it became, side by side — the pair
+      // that makes a bad image diagnosable at a glance.
+      const tagsLine = last.tags ? `\nTags: \`${last.tags.length > 600 ? `${last.tags.slice(0, 600)}…` : last.tags}\`` : '';
+      lastLine = `${formatDateTime(last.createdAt)} ${status}${timing}${kind}\n"${last.prose.slice(0, 200)}"${tagsLine}`;
     }
 
     await reply(
       md(`**📸 Selfies**
 Endpoint: **${config.selfie.endpointId}** · ${healthLine}
-Today: **${today}/${config.selfie.dailyCap}** · Output: **${sizeStr}**
+Today: **${today}** · Output: **${sizeStr}**
 Booru model: \`${config.selfie.model}\`
 
 **Last generation**
@@ -785,12 +813,14 @@ ${source}`),
 });
 
 /** The slices of the LLM prompt that `/prompt` can show, one at a time. */
-type PromptPart = 'persona' | 'technical' | 'tools' | 'summaries' | 'facts' | 'chat';
+type PromptPart = 'persona' | 'appearance' | 'technical' | 'tools' | 'summaries' | 'facts' | 'chat';
 
 /** Maps the argument the user types to a part. `/prompt` with no arg defaults to `persona`. */
 const PROMPT_PART_ALIASES: Record<string, PromptPart> = {
   p: 'persona',
   persona: 'persona',
+  a: 'appearance',
+  appearance: 'appearance',
   tech: 'technical',
   technical: 'technical',
   t: 'tools',
@@ -810,6 +840,7 @@ const PROMPT_PART_ALIASES: Record<string, PromptPart> = {
 /** The `/prompt h` help text: the part menu, plus a pointer to `/dump` for the whole thing. */
 const PROMPT_HELP = md(`**🧩 /prompt** \`<part>\` — show one slice of the prompt the LLM receives
 \`p\` — persona (default)
+\`a\` — appearance layer
 \`tech\` — technical layer
 \`t\` — tools block
 \`s\` — summaries (memory)
@@ -885,6 +916,10 @@ register({
       case 'persona':
         label = 'Persona';
         body = renderPersona(ctx);
+        break;
+      case 'appearance':
+        label = 'Appearance';
+        body = renderAppearance(ctx);
         break;
       case 'technical':
         label = 'Technical';
@@ -1151,10 +1186,12 @@ register({
     const nSummaries = getRecentSummaries(chatId, config.summary.maxKept).length;
     const sections = [
       { emoji: '🎭', name: 'Persona', body: renderPersona(ctx) },
+      { emoji: '👀', name: 'Appearance', body: renderAppearance(ctx) },
       { emoji: '⚙️', name: 'Technical', body: renderTechnical(ctx) },
       { emoji: '📇', name: `Facts (${nFacts})`, body: renderFactsBlock(chatId, userName) },
       { emoji: '🧠', name: `Memory (${nSummaries} day${nSummaries === 1 ? '' : 's'})`, body: renderMemoryBlock(chatId, userName) },
       { emoji: '🛠️', name: 'Tools', body: renderToolsBlock() },
+      { emoji: '📸', name: 'Selfie rules', body: renderSelfieBlock(ctx, new Date()) },
     ];
     const msgs = getWindowDetailed(chatId);
     const info = getWindowInfo(chatId);

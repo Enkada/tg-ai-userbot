@@ -319,7 +319,7 @@ export async function factsPass(systemPrompt: string, userMessage: string): Prom
  * reasoning on, Baidu's upstream burns the whole token budget on hidden chain-of-thought and
  * returns empty content). Throws if OpenRouter isn't configured or the call fails.
  */
-export async function booruPass(systemPrompt: string, prose: string): Promise<string> {
+export async function booruPass(systemPrompt: string, prose: string, signal?: AbortSignal): Promise<string> {
   if (!cfg.apiKey) throw new Error('Selfie generation requires OpenRouter (OPENROUTER_API_KEY is missing)');
   const { content } = await openaiChatCompletionStream({
     url: CHAT_URL,
@@ -331,10 +331,11 @@ export async function booruPass(systemPrompt: string, prose: string): Promise<st
     ],
     temperature: config.selfie.temperature,
     maxTokens: config.selfie.maxTokens,
-    timeoutMs: config.summary.timeoutMs,
+    timeoutMs: config.selfie.llmTimeoutMs,
     extraBody: { reasoning: { enabled: false } },
     label: 'Booru pass',
     dispatcher,
+    signal,
   });
   return content;
 }

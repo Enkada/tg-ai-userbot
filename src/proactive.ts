@@ -34,7 +34,8 @@ import {
   saveMessage,
   upsertProactiveState,
 } from './memory.js';
-import { finalizeReply } from './tools.js';
+import { finalizeReply, parseToolCall, stripToolCalls } from './tools.js';
+import { ackLine, isSelfieAvailable, runSelfieFlow } from './selfie.js';
 import { clearInFlight, registerInFlight } from './inflight.js';
 import { formatDateTime } from './format.js';
 import { ReplyStreamer } from './send.js';
@@ -160,10 +161,33 @@ async function sendCued(
       }
       throw err;
     }
-    const text = finalizeReply(reply.content);
+    // A send_selfie call is executed here too — she can open (or continue) with a picture.
+    // Only the parsed call opens the image path; finalizeReply strips the raw tag from the
+    // sent/persisted text either way.
+    const call = parseToolCall(reply.content);
+    const selfieProse =
+      isSelfieAvailable() && call?.name === 'send_selfie'
+        ? String(call.arguments.prompt ?? '').trim()
+        : '';
+    let text = finalizeReply(reply.content);
+    if (selfieProse && !stripToolCalls(reply.content).trim()) {
+      // A bare call leaves no prose to show — generate the "hang on" line instead.
+      text = await ackLine(systemPrompt, chatId, userName, selfieProse);
+    }
     const sentIds = await streamer.finalize(text);
     saveMessage(chatId, 'assistant', text, sentIds, { provider: activeProviderId(), model: reply.model }, opts.proactive);
     log.info(`${label} sent: ${text.slice(0, 80)}`);
+    if (selfieProse) {
+      await runSelfieFlow({
+        client,
+        peer,
+        chatId,
+        userName,
+        systemPrompt,
+        prose: selfieProse,
+        signal: controller?.signal,
+      });
+    }
   } finally {
     if (inflight) clearInFlight(chatId, inflight);
   }

@@ -37,13 +37,14 @@ function typingDelayMs(length: number): number {
 const TOOL_CALL_MARKER = '<tool_call>';
 
 /**
- * Markers that end the prose portion of a stream mid-reply. Everything from one of these on
- * is suppressed: the tool call belongs to the parser, and "[you sent" is the model imitating
- * the photo-record block the window injects — junk that must never become a bubble (index.ts
- * converts its intent into a real generation from the full completion). Matched
- * case-insensitively against the lowercased stream.
+ * Markers that end the prose portion of a stream mid-reply. Only the tool-call tag is
+ * suppressed — it's executed protocol output that belongs to the parser, never prose.
+ * Model-written bracket blocks (e.g. a `[you sent a photo: …]` imitation) are deliberately
+ * NOT suppressed: raw output stays visible in the chat and the DB (no silent censorship —
+ * you should see what happened), and the window builder strips brackets from assistant
+ * turns at prompt-build time so the mistake can't re-teach itself (see memory.ts).
  */
-const SUPPRESS_MARKERS = [TOOL_CALL_MARKER, '[you sent'];
+const SUPPRESS_MARKERS = [TOOL_CALL_MARKER];
 
 export class ReplyStreamer {
   private readonly splitter = new SentenceSplitter();

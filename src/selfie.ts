@@ -3,8 +3,8 @@
  *
  * The pipeline, per picture: the chat model calls the tool with a plain-prose description
  * ("selfie of me on my bed, default clothes, smirk, night") → the *booru pass* (a cheap
- * dedicated model, see prompts/booru.txt) converts prose to a Danbooru tag prompt opened by
- * the character's fixed identity tags (prompts/appearance.txt) → a ComfyUI workflow is built
+ * dedicated model, see prompts/passes/booru.txt) converts prose to a Danbooru tag prompt opened
+ * by the character's identity tags (prompts/passes/booru-appearance.txt) → a ComfyUI workflow is built
  * in code (base 720×1280 pass, optional 2× latent upscale second pass — the `/img upscale`
  * toggle) → submitted to the RunPod serverless endpoint and polled to completion → the PNG
  * is sent as a Telegram photo with a caption line generated *in parallel* with the image.
@@ -29,16 +29,12 @@ import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { activeProviderId, chat } from './llm.js';
 import { booruPass } from './providers/openrouter.js';
-import {
-  getWindow,
-  photosToday,
-  saveAttachment,
-  saveMessage,
-  savePhotoGen,
-} from './memory.js';
+import { getWindow, saveAttachment, saveMessage, savePhotoGen } from './memory.js';
 import { dropPanel, showPanel } from './panel.js';
 import { getImgUpscale } from './settings.js';
 import { renderMarkdown } from './format.js';
+import { sanitize } from './sanitize.js';
+import { splitMessage } from './chunker.js';
 import { parseToolCall, stripToolCalls } from './tools.js';
 
 const log = createLogger('selfie');
@@ -51,12 +47,13 @@ export function isSelfieConfigured(): boolean {
 }
 
 /**
- * Whether the tool may be offered right now: configured AND under the daily cap. Checked at
- * prompt-render time — once the cap is hit the tool (and its prompt section) simply
- * disappears, so the model can't call it and no per-call refusal path is needed.
+ * Whether the tool may be offered right now. Same as configured — the daily cap was removed
+ * (2026-07-24): each image costs ~$0.005 and every generation takes a full model turn inside
+ * the chat's serial queue, so there's no runaway loop for a cap to stop. The seam is kept so
+ * a runtime gate can return here without touching the call sites.
  */
 export function isSelfieAvailable(): boolean {
-  return isSelfieConfigured() && photosToday() < cfg.dailyCap;
+  return isSelfieConfigured();
 }
 
 // ---- Appearance file (identity tags, outfit blocks, quality tags, negative) --------------
@@ -107,7 +104,7 @@ let booruTemplate: string | undefined;
  * first, quality tags appended). Throws when the pass returns something that can't be a tag
  * line for this character — the flow treats that as a failed generation.
  */
-export async function proseToTags(prose: string): Promise<string> {
+export async function proseToTags(prose: string, signal?: AbortSignal): Promise<string> {
   const app = loadAppearance();
   if (booruTemplate === undefined) {
     booruTemplate = readFileSync(resolve(process.cwd(), cfg.promptPath), 'utf8').trim();
@@ -115,7 +112,7 @@ export async function proseToTags(prose: string): Promise<string> {
   const system = booruTemplate
     .replace(/\{\{\s*identity\s*\}\}/g, app.identity)
     .replace(/\{\{\s*outfit_(\w+)\s*\}\}/g, (m, name: string) => app.outfits.get(name.toLowerCase()) ?? m);
-  const out = (await booruPass(system, prose)).trim().replace(/\s*\n+\s*/g, ' ');
+  const out = (await booruPass(system, prose, signal)).trim().replace(/\s*\n+\s*/g, ' ');
   // Shape guard: the identity block must have been copied (its first tag is the anchor).
   const anchor = app.identity.split(',')[0].trim();
   if (!out || !out.toLowerCase().includes(anchor)) {
@@ -242,42 +239,95 @@ interface JobStatus {
   output?: { images?: { type: string; data: string }[] };
 }
 
+/** An `AbortError`-named error, so `/stop`-style aborts are distinguishable from failures. */
+function abortError(message: string): Error {
+  return Object.assign(new Error(message), { name: 'AbortError' });
+}
+
 /**
- * Submits one workflow and polls until the job completes, fails, or the wall-clock budget
- * ({@link config.selfie.timeoutMs}) runs out — the budget is generous because a cold worker
- * after idle measured 200+ s of queue time before ~54 s of execution. On timeout the job is
- * cancelled server-side so an eventually-starting worker doesn't bill for a picture nobody
- * will receive. Poll errors are tolerated (transient ECONNRESETs observed in testing).
+ * Best-effort server-side job cancel (timeout, user abort). A failed cancel is logged — an
+ * orphaned job keeps billing, so it must leave a trace to look up on RunPod.
  */
-async function runJob(workflow: Workflow): Promise<{
+async function cancelJob(jobId: string, reason: string): Promise<void> {
+  try {
+    const res = await fetch(`${runpodBase()}/cancel/${jobId}`, {
+      method: 'POST',
+      headers: runpodHeaders(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    log.info(`Selfie job ${jobId} cancelled (${reason})`);
+  } catch (err) {
+    log.warn(`Failed to cancel selfie job ${jobId} (${reason}) — it may still be billing:`, err);
+  }
+}
+
+/**
+ * Fail-fast capacity check before submitting: when the endpoint has workers but every one of
+ * them is throttled (no GPU to run on — the EU-CZ-1 era failure mode), a submit would just
+ * sit IN_QUEUE until the full timeout. Better a failure line in ~5 s than in 5 minutes. An
+ * unreachable /health is NOT proof of no capacity, so it never blocks a try; neither does an
+ * all-zero worker table (a scaled-to-zero endpoint spawns its first worker on submit).
+ */
+async function assertCapacity(): Promise<void> {
+  const health = await endpointHealth();
+  if (!health) return;
+  const w = health.workers;
+  if (w.throttled > 0 && w.ready + w.idle + w.running + w.initializing === 0) {
+    throw new Error(`No GPU capacity right now: all ${w.throttled} worker(s) throttled`);
+  }
+}
+
+/**
+ * Submits one workflow and polls until the job completes, fails, is aborted (`/stop` via
+ * `signal`), or the wall-clock budget ({@link config.selfie.timeoutMs}) runs out — the budget
+ * covers a cold worker's queue time. On timeout or abort the job is cancelled server-side so
+ * an eventually-starting worker doesn't bill for a picture nobody will receive. Transient
+ * poll errors are tolerated (ECONNRESETs observed in testing), but a response without a
+ * `status` field is a hard failure — treating it as "still in progress" would spin the whole
+ * budget on a permanently broken job (e.g. a revoked API key).
+ */
+async function runJob(
+  workflow: Workflow,
+  signal: AbortSignal | undefined,
+  onSubmit: (jobId: string) => void,
+): Promise<{
   buffer: Buffer;
   jobId: string;
   delayMs: number | undefined;
   execMs: number | undefined;
 }> {
-  const submitted = (await (
-    await fetch(`${runpodBase()}/run`, {
-      method: 'POST',
-      headers: runpodHeaders(),
-      body: JSON.stringify({ input: { workflow } }),
-      signal: AbortSignal.timeout(15_000),
-    })
-  ).json()) as JobStatus;
+  if (signal?.aborted) throw abortError('Selfie aborted before submit');
+  const submitRes = await fetch(`${runpodBase()}/run`, {
+    method: 'POST',
+    headers: runpodHeaders(),
+    body: JSON.stringify({ input: { workflow } }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!submitRes.ok) {
+    throw new Error(`RunPod submit failed: HTTP ${submitRes.status} ${(await submitRes.text()).slice(0, 200)}`);
+  }
+  const submitted = (await submitRes.json()) as JobStatus;
   if (!submitted.id) throw new Error(`RunPod submit failed: ${JSON.stringify(submitted).slice(0, 200)}`);
   const jobId = submitted.id;
+  onSubmit(jobId);
   log.info(`Selfie job ${jobId} submitted`);
 
   const deadline = Date.now() + cfg.timeoutMs;
   let job: JobStatus = submitted;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, cfg.pollMs));
+    if (signal?.aborted) {
+      await cancelJob(jobId, 'stopped by user');
+      throw abortError(`Selfie job ${jobId} aborted`);
+    }
     try {
-      job = (await (
-        await fetch(`${runpodBase()}/status/${jobId}`, {
-          headers: runpodHeaders(),
-          signal: AbortSignal.timeout(10_000),
-        })
-      ).json()) as JobStatus;
+      const res = await fetch(`${runpodBase()}/status/${jobId}`, {
+        headers: runpodHeaders(),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`status HTTP ${res.status}`);
+      job = (await res.json()) as JobStatus;
     } catch (err) {
       log.warn(`Selfie job ${jobId} poll error (retrying):`, err);
       continue;
@@ -293,16 +343,15 @@ async function runJob(workflow: Workflow): Promise<{
         execMs: job.executionTime,
       };
     }
-    if (job.status && !['IN_QUEUE', 'IN_PROGRESS'].includes(job.status)) {
+    if (!job.status) {
+      throw new Error(`Job ${jobId} returned no status: ${JSON.stringify(job).slice(0, 200)}`);
+    }
+    if (!['IN_QUEUE', 'IN_PROGRESS'].includes(job.status)) {
       throw new Error(`Job ${jobId} ended ${job.status}: ${JSON.stringify(job.error ?? '').slice(0, 200)}`);
     }
   }
   // Out of budget — cancel so the queued/zombie job doesn't run (and bill) pointlessly.
-  await fetch(`${runpodBase()}/cancel/${jobId}`, {
-    method: 'POST',
-    headers: runpodHeaders(),
-    signal: AbortSignal.timeout(10_000),
-  }).catch(() => {});
+  await cancelJob(jobId, 'timeout');
   throw new Error(`Job ${jobId} timed out after ${Math.round(cfg.timeoutMs / 1000)}s (status ${job.status})`);
 }
 
@@ -319,13 +368,38 @@ export interface GeneratedSelfie {
   execMs: number | undefined;
 }
 
-/** Runs the full prose → tags → image pipeline. Throws on any failure. */
-export async function generateSelfie(prose: string): Promise<GeneratedSelfie> {
-  const tags = await proseToTags(prose);
-  const upscaled = getImgUpscale();
-  const { workflow, seed } = buildWorkflow(tags, loadAppearance().negative, upscaled);
-  const { buffer, jobId, delayMs, execMs } = await runJob(workflow);
-  return { buffer, tags, seed, upscaled, jobId, delayMs, execMs };
+/** How far a failed generation got — attached to the thrown error so the photo_gens row can
+ * record the jobId/seed/tags of exactly the runs you'd want to look up on RunPod. */
+export interface SelfieFailInfo {
+  tags?: string;
+  seed?: number;
+  jobId?: string;
+}
+
+/** The failure info attached by {@link generateSelfie}, or {} for errors thrown before it. */
+export function selfieFailInfo(err: unknown): SelfieFailInfo {
+  return (err as { selfieInfo?: SelfieFailInfo } | null)?.selfieInfo ?? {};
+}
+
+/** Runs the full prose → tags → image pipeline. Throws on any failure (with
+ * {@link SelfieFailInfo} attached recording how far it got); `signal` aborts it (`/stop`). */
+export async function generateSelfie(prose: string, signal?: AbortSignal): Promise<GeneratedSelfie> {
+  const partial: SelfieFailInfo = {};
+  try {
+    await assertCapacity();
+    const tags = await proseToTags(prose, signal);
+    partial.tags = tags;
+    const upscaled = getImgUpscale();
+    const { workflow, seed } = buildWorkflow(tags, loadAppearance().negative, upscaled);
+    partial.seed = seed;
+    const { buffer, jobId, delayMs, execMs } = await runJob(workflow, signal, (id) => {
+      partial.jobId = id;
+    });
+    return { buffer, tags, seed, upscaled, jobId, delayMs, execMs };
+  } catch (err) {
+    if (err instanceof Error) (err as Error & { selfieInfo?: SelfieFailInfo }).selfieInfo = partial;
+    throw err;
+  }
 }
 
 /** Saves a generated PNG under data/photos for traceability. Non-fatal: null on failure. */
@@ -345,13 +419,30 @@ export function savePng(buffer: Buffer): string | null {
 // ---- Ephemeral cues (never persisted — the ack/caption/failure lines are what's stored) ---
 
 /**
- * One-shot chat-model call: the current window plus an ephemeral cue as the trailing user
- * turn. Any stray tool-call tag in the output is stripped; empty results fall back.
+ * The chunker-equivalent cleanup a normal streamed bubble gets, for the single-message lines
+ * this file sends (photo caption, failure line): sanitize (typographic tells) + per-bubble
+ * trailing-dot strip, rejoined. Without it a caption keeps its trailing period — the exact
+ * tell the chunker exists to remove.
  */
-async function cueLine(systemPrompt: string, chatId: number, cue: string, fallback: string): Promise<string> {
+function cleanLine(text: string): string {
+  return splitMessage(sanitize(text)).join('\n');
+}
+
+/**
+ * One-shot chat-model call: the current window plus an ephemeral cue as the trailing user
+ * turn. Any stray tool-call tag in the output is stripped and the result gets the same
+ * sanitize + chunker treatment as a normal bubble; empty results fall back.
+ */
+async function cueLine(
+  systemPrompt: string,
+  chatId: number,
+  cue: string,
+  fallback: string,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
-    const result = await chat(systemPrompt, [...getWindow(chatId), { role: 'user', content: cue }]);
-    return stripToolCalls(result.content).trim() || fallback;
+    const result = await chat(systemPrompt, [...getWindow(chatId), { role: 'user', content: cue }], undefined, signal);
+    return cleanLine(stripToolCalls(result.content)) || fallback;
   } catch (err) {
     log.warn('Cue line generation failed, using fallback:', err);
     return fallback;
@@ -369,12 +460,13 @@ export function ackLine(systemPrompt: string, chatId: number, userName: string, 
 }
 
 /** The line sent together with the finished photo (generated while the image renders). */
-function captionLine(systemPrompt: string, chatId: number, prose: string): Promise<string> {
+function captionLine(systemPrompt: string, chatId: number, prose: string, signal?: AbortSignal): Promise<string> {
   return cueLine(
     systemPrompt,
     chatId,
     `[System note: you made the picture and are sending it now: "${prose}". Write the one short line you send with it - your usual voice, nothing else.]`,
     '',
+    signal,
   );
 }
 
@@ -398,32 +490,34 @@ export interface SelfieFlowOpts {
   systemPrompt: string;
   /** The model's prose description — the send_selfie `prompt` argument. */
   prose: string;
+  /** `/stop`'s abort signal: cancels the booru pass, the RunPod job, and the caption pass. */
+  signal?: AbortSignal;
 }
 
 /**
  * Runs one conversation-driven selfie to completion: progress panel up (ground truth that
  * the tool really fired — and a "don't bother typing yet" signal), caption generated in
  * parallel with the image, photo + caption sent as ONE Telegram message, everything
- * persisted (message row = caption; attachments row = the prose, so the window shows
- * `[you sent a photo: …]`; photo_gens row = full traceability). On failure: panel down,
- * an in-character line is sent and stored, and the attempt is recorded as failed (it still
- * counts toward the daily cap so a broken endpoint can't burn unlimited retries).
+ * persisted (message row = caption; attachments row = the prose, so the window renders the
+ * protocol turns — see renderSelfieWindowTurns in memory.ts; photo_gens row = full
+ * traceability). On failure: panel down, an in-character line is sent and stored, and the
+ * attempt is recorded as failed with whatever jobId/seed/tags it got to. A `/stop` abort
+ * (via `opts.signal`) cancels the RunPod job and ends in silence — an intentional halt, not
+ * a failure, so no failure line is sent.
  *
- * Runs inside the chat's queue task — messages arriving during the ~20-300s generation
- * simply queue behind it, which is also correct in-fiction: she's off "taking the photo".
+ * Runs inside the chat's queue task — messages arriving during the generation simply queue
+ * behind it, which is also correct in-fiction: she's off "taking the photo".
  */
 export async function runSelfieFlow(opts: SelfieFlowOpts): Promise<void> {
-  const { client, peer, chatId, userName, systemPrompt, prose } = opts;
+  const { client, peer, chatId, userName, systemPrompt, prose, signal } = opts;
   log.info(`Selfie flow for chat ${chatId}: ${prose.slice(0, 100)}`);
   await showPanel(client, peer, chatId, '📸 Making a picture…').catch(() => {});
   // The caption rides along while the image generates — its latency is fully absorbed.
-  const captionPromise = captionLine(systemPrompt, chatId, prose);
+  const captionPromise = captionLine(systemPrompt, chatId, prose, signal);
 
-  let tags = '';
   const upscaled = getImgUpscale();
   try {
-    const gen = await generateSelfie(prose);
-    tags = gen.tags;
+    const gen = await generateSelfie(prose, signal);
     const filePath = savePng(gen.buffer);
     const caption = await captionPromise;
     client.sendTyping(peer, 'upload_photo').catch(() => {});
@@ -450,17 +544,26 @@ export async function runSelfieFlow(opts: SelfieFlowOpts): Promise<void> {
       filePath: filePath ?? undefined,
     });
   } catch (err) {
-    log.error('Selfie flow failed:', err);
+    const info = selfieFailInfo(err);
+    const aborted = (err as { name?: string } | null)?.name === 'AbortError' || signal?.aborted;
     savePhotoGen({
       chatId,
       prose,
-      tags,
+      tags: info.tags ?? '',
+      seed: info.seed,
+      jobId: info.jobId,
       upscaled,
       status: 'failed',
-      error: String(err).slice(0, 500),
+      error: aborted ? 'aborted by /stop' : String(err).slice(0, 500),
     });
     // Whatever the caption call produced is for a photo that doesn't exist — drop it.
     captionPromise.catch(() => {});
+    if (aborted) {
+      // /stop is an intentional halt: keep quiet, like an aborted text generation.
+      log.info('Selfie flow stopped by user.');
+      return;
+    }
+    log.error('Selfie flow failed:', err);
     const text = await failureLine(systemPrompt, chatId);
     try {
       const sent = await client.sendText(peer, renderMarkdown(text));
@@ -497,7 +600,7 @@ export function looksLikePhotoPromise(replyText: string): boolean {
  */
 export async function maybeRepairPromise(opts: Omit<SelfieFlowOpts, 'prose'>): Promise<void> {
   if (!isSelfieAvailable()) return;
-  const { systemPrompt, chatId, userName } = opts;
+  const { systemPrompt, chatId, userName, signal } = opts;
   const cue =
     `[System note: check your previous message. If in it you told ${userName} you would send or show ` +
     'him something visual right now (a picture of yourself, your outfit, your room - your pictures ' +
@@ -505,7 +608,8 @@ export async function maybeRepairPromise(opts: Omit<SelfieFlowOpts, 'prose'>): P
     'nothing visual, or only vaguely for later, output exactly: no]';
   let out: string;
   try {
-    out = (await chat(systemPrompt, [...getWindow(chatId), { role: 'user', content: cue }])).content;
+    out = (await chat(systemPrompt, [...getWindow(chatId), { role: 'user', content: cue }], undefined, signal))
+      .content;
   } catch (err) {
     log.warn('Promise gate call failed (skipping):', err);
     return;

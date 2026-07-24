@@ -38,10 +38,10 @@ const WEB_SEARCH: ToolDef = {
 };
 
 /**
- * The selfie tool — gated on RunPod + OpenRouter being configured and the daily cap not yet
- * hit (see selfie.ts). Its usage rules live in their own prompt section (prompts/selfie.txt,
- * appended in prompt.ts), not in this one-liner. The arrow (not a direct reference) keeps
- * the tools ↔ selfie import cycle safe at module-init time.
+ * The selfie tool — gated on RunPod + OpenRouter being configured (see selfie.ts). Its usage
+ * rules live in their own prompt section (prompts/tools/selfie.txt, appended in prompt.ts),
+ * not in this one-liner. The arrow (not a direct reference) keeps the tools ↔ selfie import
+ * cycle safe at module-init time.
  */
 const SEND_SELFIE: ToolDef = {
   name: 'send_selfie',
@@ -129,30 +129,17 @@ export function stripToolCalls(text: string): string {
 
 /**
  * A model-written imitation of the photo-record block ("[you sent a photo: …]") — the shape
- * the window injects for real photo turns, which the model starts copying instead of calling
- * send_selfie once one enters the context (see SELFIE_FORMAT_CUE in generate.ts for the
- * prompt-side fix). These are never legitimate output: the block is composed by the window
- * builder, not written. `[^\]]*` deliberately spans newlines.
+ * old windows injected for real photo turns. Detection only: the reply is sent and persisted
+ * verbatim (no silent censorship — the raw output should be visible), the window builder
+ * strips assistant brackets at prompt-build time so it can't re-teach itself (memory.ts),
+ * and index.ts runs the promise gate on a detected block so the picture the model implied
+ * still arrives via a *proper* tool call — or not at all. `[^\]]*` deliberately spans newlines.
  */
-const FAKE_PHOTO_RE = /\[\s*you sent (?:a )?photo[^\]]*\]/gi;
+const FAKE_PHOTO_RE = /\[\s*you sent (?:a )?photo[^\]]*\]/i;
 
-/** Removes every fake photo-record block from a reply, collapsing the gap it leaves. */
-export function stripFakePhotoBlocks(text: string): string {
-  return text.replace(FAKE_PHOTO_RE, '').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-/**
- * The prose of the first fake photo-record block in a reply, or null. When the model
- * imitates the block instead of calling the tool, this *is* a well-formed picture
- * description in its own words — index.ts feeds it to the real photo flow, so the promise
- * the model just made is kept and the stored turn (ack + attachments row) looks exactly
- * like a proper tool-call turn. The window therefore never carries the wrong pattern, which
- * is what keeps the imitation from reinforcing itself.
- */
-export function extractFakePhotoProse(text: string): string | null {
-  const m = /\[\s*you sent (?:a )?photo:?\s*([^\]]*)\]/i.exec(text);
-  const prose = m?.[1].trim().replace(/\s+/g, ' ');
-  return prose ? prose : null;
+/** Whether a reply contains a fake photo-record block (see {@link FAKE_PHOTO_RE}). */
+export function containsFakePhotoBlock(text: string): boolean {
+  return FAKE_PHOTO_RE.test(text);
 }
 
 /** Fallback shown when a reply is nothing but an (unfulfillable) tool call. */
@@ -160,21 +147,16 @@ const NO_ANSWER = "couldn't dig that up, sorry — try rephrasing?";
 
 /**
  * Prepares a model reply for sending. If it contains a *valid* tool call (e.g. the search
- * loop hit its cap, or a context like /reroll that doesn't run tools), the call is stripped
+ * loop hit its cap, or a context that executes the call separately), the call is stripped
  * so no raw tag reaches the chat — falling back to {@link NO_ANSWER} if nothing remains. A
  * reply with no tag, or with a *malformed* tag, is returned unchanged (sent as-is, which
  * surfaces a misbehaving model for debugging by design).
  *
- * NOTE: an echoed leading `[…]` annotation (the model copying an injected cue like
- * `[<user> sent a photo: …]`) is deliberately NOT stripped here — the cue-format prompt
- * changes drove organic echoes to ~0, and we keep the raw output transparent (visible in
- * chat and persisted) rather than silently repairing it. See {@link withCaptions}.
+ * NOTE: bracketed `[…]` text (an echoed cue, a fake photo-record block) is deliberately NOT
+ * stripped here — model output reaches the chat and the DB unrewritten; only the prompt
+ * builder cleans brackets out of what the model is later fed back (see memory.ts).
  */
 export function finalizeReply(content: string): string {
-  // Fake photo-record blocks are junk in every context (reactive, reroll, proactive) — a
-  // reply must never carry one into the chat or the DB. Callers that want to honor the
-  // block's intent (index.ts) extract the prose separately before finalizing.
-  const cleaned = stripFakePhotoBlocks(content);
-  if (!parseToolCall(cleaned)) return cleaned || (content === cleaned ? cleaned : NO_ANSWER);
-  return stripToolCalls(cleaned) || NO_ANSWER;
+  if (!parseToolCall(content)) return content.trim();
+  return stripToolCalls(content) || NO_ANSWER;
 }

@@ -6,6 +6,6 @@ data/
 .env
 *.log
 # Legacy persona file (now only a one-time DB seed; the live persona is in the DB)
-prompts/persona.txt
+prompts/system/persona.txt
 # Local image-gen test scratch (prompt drafts, generated PNGs)
 .img-gen-test/

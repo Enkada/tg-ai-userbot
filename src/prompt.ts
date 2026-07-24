@@ -21,6 +21,14 @@ const log = createLogger('prompt');
 const technical = readFileSync(resolve(process.cwd(), config.llm.technicalPromptPath), 'utf8').trim();
 log.info(`Loaded technical prompt layer (${technical.length} chars)`);
 
+/**
+ * The app-owned appearance layer: the character's actual look, in prose. Referenced by the
+ * persona ("the look described in Appearance") and by the selfie tool section; the
+ * generator-side tag version lives separately in prompts/passes/booru-appearance.txt.
+ */
+const appearance = readFileSync(resolve(process.cwd(), config.llm.appearancePromptPath), 'utf8').trim();
+log.info(`Loaded appearance prompt layer (${appearance.length} chars)`);
+
 export interface PromptContext {
   /** Display name of the Telegram user the bot is talking to (for {{user}}). */
   userName: string;
@@ -220,6 +228,11 @@ export function renderTechnical(ctx: PromptContext, opts: { now?: Date } = {}): 
   return substitute(technical, ctx, opts.now ?? new Date());
 }
 
+/** The appearance layer with tags substituted — the character's actual look. */
+export function renderAppearance(ctx: PromptContext, opts: { now?: Date } = {}): string {
+  return substitute(appearance, ctx, opts.now ?? new Date());
+}
+
 /** The selfie tool's usage section (prompts/selfie.txt), loaded lazily like the tools scaffold. */
 let selfieTemplate: string | undefined;
 
@@ -243,8 +256,8 @@ export function renderSystemPrompt(
 ): string {
   const { now = new Date(), includeMemory = true } = opts;
 
-  // Persona + technical → facts (who the user is) → memory (recollections) → tools
-  // (capabilities/protocol) → selfie rules. The facts and memory blocks are rendered per
+  // Persona + appearance + technical → facts (who the user is) → memory (recollections) →
+  // tools (capabilities/protocol) → selfie rules. The facts and memory blocks are rendered per
   // message, so /prompt and /context reflect the exact prompt the LLM sees. Unlike the memory
   // block, facts are NOT dropped for proactive openers: they're timeless background rather
   // than salient events, so the opener-fixation problem that exiled summaries doesn't apply
@@ -255,7 +268,15 @@ export function renderSystemPrompt(
   // The tools scaffold contains {{user}} too — substitute it like the other layers.
   const tools = substitute(renderToolsBlock(), ctx, now);
   const selfie = renderSelfieBlock(ctx, now);
-  return [renderPersona(ctx, { now }), renderTechnical(ctx, { now }), factsBlock, memory, tools, selfie]
+  return [
+    renderPersona(ctx, { now }),
+    renderAppearance(ctx, { now }),
+    renderTechnical(ctx, { now }),
+    factsBlock,
+    memory,
+    tools,
+    selfie,
+  ]
     .filter(Boolean)
     .join('\n\n');
 }
