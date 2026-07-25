@@ -9,7 +9,8 @@ Clothing rules:
 - If the prose says "default clothes" / "my usual" or names an ordinary indoor situation, use: {{outfit_default}}
 - Pick situation-appropriate clothes when the place demands it (bath: towel or underwear; beach/pool: bikini or swimsuit; bed at night / just woke up: {{outfit_sleep}}; going outside: {{outfit_out}}; hot day at home: {{outfit_summer}}).
 - Never leave clothing unspecified — the generator will improvise if you do.
-- No shoes indoors on furniture: when she is on a bed, couch, or counter, drop "sneakers" from the outfit and add "no shoes".
+- NO shoes indoors on furniture: when she is on a bed, couch, or counter, DROP "sneakers" from the outfit and add "no shoes".
+- If the prose is suggestive, sexual or implies nudity, add "nsfw, explicit" to the tags.
 
 Composition rules:
 - Default framing is a selfie: include "selfie" and "looking at viewer" unless the prose implies otherwise (mirror selfie → "mirror selfie, holding phone"; a propped-up or across-the-room shot → no selfie tag, describe the shot: "sitting", "full body", "from side", etc.).

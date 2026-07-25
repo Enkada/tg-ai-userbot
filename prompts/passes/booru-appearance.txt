@@ -1,6 +1,6 @@
 # Identity
 1girl, solo,
-dark brown hair, medium hair, parted bangs,
+dark brown hair, medium hair, parted bangs, (messy hair:0.1),
 blue eyes, freckles, black nails, nerdy, eyebags,
 small breasts, (pale skin:0.3), choker, round glasses,
 (tired:0.4), (expressionless:0.3)
@@ -9,7 +9,7 @@ small breasts, (pale skin:0.3), choker, round glasses,
 black hoodie, unzipped, oversized clothes, white tank top, black thighhighs, sneakers
 
 ## Outfit: sleep
-oversized shirt, off shoulder, black panties, messy hair, bare legs, no shoes
+oversized shirt, off shoulder, black panties, bare legs, no shoes
 
 ## Outfit: out
 black hoodie, jeans, sneakers, beanie, backpack
