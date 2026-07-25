@@ -5,6 +5,7 @@
  * (they differ only in URL, auth headers, and a few body fields).
  */
 import { fetch as undiciFetch, type Dispatcher } from 'undici';
+import { CAPTION_SYSTEM_PROMPT, CAPTION_USER_PROMPT } from '../prompts/index.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -249,23 +250,17 @@ export async function openaiChatCompletionStream(opts: {
 }
 
 /**
- * System prompt for the image-captioning pass. A neutral describer — NOT the companion
- * persona — kept terse on purpose. The `max_tokens` cap is the real backstop against
- * runaway descriptions; this just steers tone and content. Shared by all providers.
+ * Builds the OpenAI-standard vision user-turn (text + image data URI) for a caption pass.
+ * The captioner is a neutral describer, NOT the companion persona — see CAPTION_SYSTEM_PROMPT
+ * in prompts/index.ts. Shared by all providers.
  */
-export const CAPTION_SYSTEM_PROMPT =
-  'You describe images. Given an image, reply with one or two concise sentences naming the ' +
-  'main subject, the setting, and any prominent text or notable detail. No preamble, no ' +
-  'markdown, no lists — just the description.';
-
-/** Builds the OpenAI-standard vision user-turn (text + image data URI) for a caption pass. */
 export function captionMessages(base64: string, mime: string): OutboundMessage[] {
   return [
     { role: 'system', content: CAPTION_SYSTEM_PROMPT },
     {
       role: 'user',
       content: [
-        { type: 'text', text: 'Describe this image concisely.' },
+        { type: 'text', text: CAPTION_USER_PROMPT },
         { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
       ],
     },

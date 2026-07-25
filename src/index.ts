@@ -4,7 +4,7 @@ import { createLogger } from './logger.js';
 import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
 import { dropPanel, showPanel, sweepDebris, trackDebris, untrackDebris } from './panel.js';
 import { activeProviderId, canCaptionImages, describeImage, initProvider } from './llm.js';
-import { renderSystemPrompt } from './prompt.js';
+import { renderSystemPrompt } from './prompts/render.js';
 import { runMigrations } from './db/index.js';
 import { initPersona } from './persona.js';
 import { initSettings } from './settings.js';

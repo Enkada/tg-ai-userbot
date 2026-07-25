@@ -1,10 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { desc } from 'drizzle-orm';
 import { db } from './db/index.js';
 import { personaVersions, type PersonaVersionRow } from './db/schema.js';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
+import { readLegacyPersona, readPersonaDefault } from './prompts/index.js';
 
 const log = createLogger('persona');
 
@@ -15,9 +14,9 @@ const log = createLogger('persona');
  */
 let persona: string | null = null;
 
-/** Reads the shipped default persona (`prompts/persona.default.txt`, tracked in git). */
+/** Reads the shipped default persona (`prompts/system/persona.default.txt`, tracked in git). */
 export function readDefaultPersona(): string {
-  return readFileSync(resolve(process.cwd(), config.llm.personaDefaultPath), 'utf8').trim();
+  return readPersonaDefault();
 }
 
 /** Appends a version row and points the in-memory cache at it. Every change goes through here. */
@@ -45,12 +44,11 @@ export function initPersona(): void {
     return;
   }
 
-  const legacyPath = resolve(process.cwd(), config.llm.personaPromptPath);
-  const fromLegacy = existsSync(legacyPath);
-  const seed = fromLegacy ? readFileSync(legacyPath, 'utf8').trim() : readDefaultPersona();
+  const legacy = readLegacyPersona();
+  const seed = legacy ?? readDefaultPersona();
   appendVersion(seed, 'migrated');
   log.info(
-    `Seeded persona_versions from ${fromLegacy ? config.llm.personaPromptPath : config.llm.personaDefaultPath} (${seed.length} chars)`,
+    `Seeded persona_versions from ${legacy ? config.llm.personaPromptPath : config.llm.personaDefaultPath} (${seed.length} chars)`,
   );
 }
 

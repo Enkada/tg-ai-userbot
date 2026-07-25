@@ -20,8 +20,6 @@
  * retry independently. A malformed response leaves the cursor put, so the day is retried on
  * the next tick.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { config } from './config.js';
 import { FACT_CATEGORIES, type FactCategory, type FactRow } from './db/schema.js';
 import { createLogger } from './logger.js';
@@ -37,13 +35,12 @@ import {
   setFactsCursor,
 } from './memory.js';
 import { factsPass } from './providers/openrouter.js';
+import { FACTS_EMPTY_LIST, FACTS_PASS, factListItem, factsPassUserMessage } from './prompts/index.js';
+import { substitute } from './prompts/render.js';
 import { getCharName } from './settings.js';
 import { dayStart, nextDayStart, prevDayStart } from './summary.js';
 
 const log = createLogger('facts');
-
-/** The app-owned diff-pass system prompt, loaded once. */
-const FACTS_TEMPLATE = readFileSync(resolve(process.cwd(), config.facts.promptPath), 'utf8').trim();
 
 // ---- The diff-pass exchange --------------------------------------------------------------
 
@@ -53,16 +50,19 @@ type FactOp =
   | { op: 'edit'; id: number; content: string; reason?: string }
   | { op: 'delete'; id: number; reason?: string };
 
-/** Renders the diff-pass system prompt with the character/user names substituted. */
-function renderFactsPrompt(charName: string, userName: string): string {
-  return FACTS_TEMPLATE.replaceAll('{{char}}', charName).replaceAll('{{user}}', userName);
+/**
+ * Renders the diff-pass system prompt through the same `{{tag}}` engine as the chat layers,
+ * so this pass gets `{{char}}`/`{{user}}` (all it uses today) and the valued date tags alike.
+ */
+function renderFactsPrompt(chatId: number, userName: string): string {
+  return substitute(FACTS_PASS, { userName, chatId }, new Date());
 }
 
 /** `[12] (work, learned 2026-07-03) Kirill works at …` — the fact list as the diff pass sees it. */
 function renderFactList(rows: FactRow[]): string {
-  if (rows.length === 0) return '(no facts recorded yet)';
+  if (rows.length === 0) return FACTS_EMPTY_LIST;
   return rows
-    .map((f) => `[${f.id}] (${f.category}, learned ${new Date(f.createdAt).toISOString().slice(0, 10)}) ${f.content}`)
+    .map((f) => factListItem(f.id, f.category, new Date(f.createdAt).toISOString().slice(0, 10), f.content))
     .join('\n');
 }
 
@@ -86,10 +86,7 @@ function buildUserMessage(chatId: number, start: number, end: number, userName: 
     day: 'numeric',
     year: 'numeric',
   });
-  return (
-    `# Current facts about ${userName}\n${renderFactList(getFacts(chatId))}\n\n` +
-    `# Transcript — ${dateLabel}\n<transcript>\n${transcript}\n</transcript>`
-  );
+  return factsPassUserMessage(userName, renderFactList(getFacts(chatId)), dateLabel, transcript);
 }
 
 /**
@@ -194,7 +191,7 @@ function applyOps(chatId: number, ops: FactOp[], dayLabel: string): { applied: n
  */
 async function processDay(chatId: number, start: number, end: number): Promise<void> {
   const userName = getSummaryState(chatId)?.userName ?? 'they';
-  const system = renderFactsPrompt(getCharName(), userName);
+  const system = renderFactsPrompt(chatId, userName);
   const user = buildUserMessage(chatId, start, end, userName);
   const dayLabel = new Date(start).toISOString().slice(0, 10);
 

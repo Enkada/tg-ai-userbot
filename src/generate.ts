@@ -20,6 +20,7 @@ import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { chat, type ChatMessage, type ChatResult } from './llm.js';
 import { getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
+import { REPLY_FORMAT_CUE, SELFIE_FORMAT_CUE } from './prompts/index.js';
 import { isSearchConfigured, webSearch } from './search.js';
 import { isSelfieAvailable } from './selfie.js';
 import { parseToolCall } from './tools.js';
@@ -88,35 +89,6 @@ export async function generateReply(
   }
   return result;
 }
-
-/**
- * Ephemeral format cue appended to the final user turn of every reactive generation (and
- * reroll). It rides the prompt *tail* because that's the only position that out-competes the
- * in-context pattern: the window carries ~30 of the bot's own recent replies, and once those
- * run long the top-of-prompt persona rule loses to them (measured drift: 2.7 → 5.7 avg
- * sentences over 583 replies, while the tail-cued proactive openers held at ~3.2 in the same
- * windows). This wording tested at 2-3 sentences on casual turns, stretching to ~5 on packed
- * ones and fully opening on an explicit ask, with 0/108 echo/acknowledgment. The numeric
- * ceiling ("up to 5") is load-bearing — an open-ended "take the room you need" variant blew
- * up to 17-sentence walls. Never stored: applied at history-build time only, so the DB,
- * summaries, and /dump stay clean.
- */
-export const REPLY_FORMAT_CUE =
-  '[System note: you text in short bursts - answer in 1-3 casual sentences, single paragraph. ' +
-  'If there is genuinely a lot to respond to, up to 5, never a wall of text. ' +
-  'Longer only when explicitly requested.]';
-
-/**
- * Extra tail-cue sentence appended while the selfie tool is offered. Once a photo turn
- * enters the window as a `[you sent a photo: …]` block, the model starts imitating that
- * block instead of calling the tool (measured 3/8 on the prod transcript that surfaced it).
- * A rule inside the selfie prompt section did nothing (3/8 imitation unchanged) — only the
- * tail position beats the in-context pattern, exactly like the reply-length cue: 0/8
- * imitation with this sentence riding REPLY_FORMAT_CUE (2026-07-19).
- */
-export const SELFIE_FORMAT_CUE =
-  ' Bracketed [...] lines in the chat are system records - never write one yourself; ' +
-  'to send a picture, output the send_selfie tool call.';
 
 /**
  * Returns `history` with {@link REPLY_FORMAT_CUE} appended to the trailing user turn — after

@@ -14,6 +14,7 @@ import {
 import type { FactCategory, FactRow, FactsStateRow, PhotoGenRow, ProactiveStateRow, SummaryStateRow } from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
+import { PHOTO_SENT_ACK, photoRecord, photoRecordNumbered, searchRecord } from './prompts/index.js';
 import { sanitize } from './sanitize.js';
 import { getCharName } from './settings.js';
 
@@ -285,9 +286,7 @@ function withCaptions(content: string, captions: string[], who: string): string 
   if (captions.length === 0) return content;
   const blocks = captions
     .map((c, i) =>
-      captions.length === 1
-        ? `[${who} sent a photo: ${c}]`
-        : `[${who} sent photo ${i + 1}: ${c}]`,
+      captions.length === 1 ? photoRecord(who, c) : photoRecordNumbered(who, i + 1, c),
     )
     .join('\n');
   // Photo-only messages have empty content — then the blocks are the whole turn.
@@ -330,7 +329,7 @@ export function renderSelfieWindowTurns(
     .join('\n');
   const turns: { role: 'user' | 'assistant'; content: string }[] = [
     { role: 'assistant', content: calls },
-    { role: 'user', content: '[photo sent]' },
+    { role: 'user', content: PHOTO_SENT_ACK },
   ];
   if (caption) turns.push({ role: 'assistant', content: caption });
   return turns;
@@ -357,9 +356,7 @@ export interface SearchEntry {
  */
 export function withSearches(content: string, results: SearchEntry[]): string {
   if (results.length === 0) return content;
-  const blocks = results
-    .map((r) => `[you already searched the web for "${r.query}" - results:\n${r.summary}]`)
-    .join('\n');
+  const blocks = results.map((r) => searchRecord(r.query, r.summary)).join('\n');
   return content ? `${content}\n${blocks}` : blocks;
 }
 

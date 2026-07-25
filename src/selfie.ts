@@ -21,7 +21,7 @@
  * - Every LLM call here must run with reasoning off (the booru pass inherits this from
  *   {@link booruPass}); Baidu's default-on reasoning eats the token budget → null content.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { InputMedia, type InputPeerLike, type TelegramClient } from '@mtcute/node';
 import { fetch } from 'undici';
@@ -30,6 +30,15 @@ import { createLogger } from './logger.js';
 import { activeProviderId, chat } from './llm.js';
 import { booruPass } from './providers/openrouter.js';
 import { getWindow, saveAttachment, saveMessage, savePhotoGen } from './memory.js';
+import {
+  BOORU_APPEARANCE,
+  BOORU_PASS,
+  SELFIE_ACK_FALLBACK,
+  SELFIE_FAILURE_CUE,
+  SELFIE_FAILURE_FALLBACK,
+  selfieAckCue,
+  selfieCaptionCue,
+} from './prompts/index.js';
 import { dropPanel, showPanel } from './panel.js';
 import { getImgUpscale } from './settings.js';
 import { renderMarkdown } from './format.js';
@@ -77,12 +86,13 @@ function flatten(block: string): string {
 }
 
 /**
- * Parses prompts/appearance.txt. Lazy + cached — the file is user-tuned content, but like
- * the other prompt layers it's read once per process (a deploy restarts the process anyway).
+ * Parses {@link BOORU_APPEARANCE} into its identity/outfit/quality/negative sections. The text
+ * is loaded at startup with the other prompt files; only this parse is lazy, so a malformed
+ * appearance file fails the first selfie rather than the whole boot.
  */
 function loadAppearance(): Appearance {
   if (appearanceCache) return appearanceCache;
-  const raw = readFileSync(resolve(process.cwd(), cfg.appearancePath), 'utf8');
+  const raw = BOORU_APPEARANCE;
   const identity = flatten(/# Identity\n([\s\S]*?)(?=\n## )/.exec(raw)?.[1] ?? '');
   if (!identity) throw new Error(`No "# Identity" block in ${cfg.appearancePath}`);
   const outfits = new Map<string, string>();
@@ -97,8 +107,6 @@ function loadAppearance(): Appearance {
 
 // ---- Booru pass (prose → tag prompt) -----------------------------------------------------
 
-let booruTemplate: string | undefined;
-
 /**
  * Converts the model's prose description into the full positive tag prompt (identity tags
  * first, quality tags appended). Throws when the pass returns something that can't be a tag
@@ -106,10 +114,7 @@ let booruTemplate: string | undefined;
  */
 export async function proseToTags(prose: string, signal?: AbortSignal): Promise<string> {
   const app = loadAppearance();
-  if (booruTemplate === undefined) {
-    booruTemplate = readFileSync(resolve(process.cwd(), cfg.promptPath), 'utf8').trim();
-  }
-  const system = booruTemplate
+  const system = BOORU_PASS
     .replace(/\{\{\s*identity\s*\}\}/g, app.identity)
     .replace(/\{\{\s*outfit_(\w+)\s*\}\}/g, (m, name: string) => app.outfits.get(name.toLowerCase()) ?? m);
   const out = (await booruPass(system, prose, signal)).trim().replace(/\s*\n+\s*/g, ' ');
@@ -451,33 +456,17 @@ async function cueLine(
 
 /** The "hang on" line when the model emitted a bare tool call with no prose of its own. */
 export function ackLine(systemPrompt: string, chatId: number, userName: string, prose: string): Promise<string> {
-  return cueLine(
-    systemPrompt,
-    chatId,
-    `[System note: your picture is being made: "${prose}". Say one short line telling ${userName} to hang on while you take it - your usual voice, nothing else.]`,
-    'gimme a sec',
-  );
+  return cueLine(systemPrompt, chatId, selfieAckCue(userName, prose), SELFIE_ACK_FALLBACK);
 }
 
 /** The line sent together with the finished photo (generated while the image renders). */
 function captionLine(systemPrompt: string, chatId: number, prose: string, signal?: AbortSignal): Promise<string> {
-  return cueLine(
-    systemPrompt,
-    chatId,
-    `[System note: you made the picture and are sending it now: "${prose}". Write the one short line you send with it - your usual voice, nothing else.]`,
-    '',
-    signal,
-  );
+  return cueLine(systemPrompt, chatId, selfieCaptionCue(prose), '', signal);
 }
 
 /** The in-character line for a failed generation (timeout, job error, send error). */
 function failureLine(systemPrompt: string, chatId: number): Promise<string> {
-  return cueLine(
-    systemPrompt,
-    chatId,
-    '[System note: the picture you tried to make did not come out - say one short line brushing it off, nothing else. Do not promise another one right now.]',
-    "ugh, it came out cursed. not sending that",
-  );
+  return cueLine(systemPrompt, chatId, SELFIE_FAILURE_CUE, SELFIE_FAILURE_FALLBACK);
 }
 
 // ---- The chat flow -----------------------------------------------------------------------

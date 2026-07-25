@@ -11,15 +11,7 @@ import {
   type ChatMessage,
   type ChatResult,
 } from './llm.js';
-import {
-  renderAppearance,
-  renderFactsBlock,
-  renderMemoryBlock,
-  renderPersona,
-  renderSelfieBlock,
-  renderSystemPrompt,
-  renderTechnical,
-} from './prompt.js';
+import { findPromptPart, renderSystemPrompt, SYSTEM_PROMPT_PARTS } from './prompts/render.js';
 import {
   addFact,
   deleteFact,
@@ -29,7 +21,6 @@ import {
   getFacts,
   getLastAssistant,
   getLastRole,
-  getRecentSummaries,
   getWindow,
   getWindowDetailed,
   getWindowInfo,
@@ -62,7 +53,7 @@ import { getCharName, getImgUpscale, normalizeCharName, setCharName, setImgUpsca
 import { formatDateTime, renderMarkdown } from './format.js';
 import { withTyping } from './typing.js';
 import { getSearchUsage, isSearchConfigured } from './search.js';
-import { finalizeReply, parseToolCall, renderToolsBlock, stripToolCalls } from './tools.js';
+import { finalizeReply, parseToolCall, stripToolCalls } from './tools.js';
 import { ReplyStreamer } from './send.js';
 import { splitMessage } from './chunker.js';
 import { stopInFlight } from './inflight.js';
@@ -812,43 +803,23 @@ ${source}`),
   },
 });
 
-/** The slices of the LLM prompt that `/prompt` can show, one at a time. */
-type PromptPart = 'persona' | 'appearance' | 'technical' | 'tools' | 'summaries' | 'facts' | 'chat';
+/** The chat window — the one `/prompt` target that isn't a system-prompt layer. */
+const CHAT_ALIASES = ['c', 'chat', 'history', 'conversation'];
 
-/** Maps the argument the user types to a part. `/prompt` with no arg defaults to `persona`. */
-const PROMPT_PART_ALIASES: Record<string, PromptPart> = {
-  p: 'persona',
-  persona: 'persona',
-  a: 'appearance',
-  appearance: 'appearance',
-  tech: 'technical',
-  technical: 'technical',
-  t: 'tools',
-  tools: 'tools',
-  s: 'summaries',
-  summary: 'summaries',
-  summaries: 'summaries',
-  f: 'facts',
-  fact: 'facts',
-  facts: 'facts',
-  c: 'chat',
-  chat: 'chat',
-  history: 'chat',
-  conversation: 'chat',
-};
-
-/** The `/prompt h` help text: the part menu, plus a pointer to `/dump` for the whole thing. */
-const PROMPT_HELP = md(`**🧩 /prompt** \`<part>\` — show one slice of the prompt the LLM receives
-\`p\` — persona (default)
-\`a\` — appearance layer
-\`tech\` — technical layer
-\`t\` — tools block
-\`s\` — summaries (memory)
-\`f\` — facts block as a .md file (as the model sees it — use \`/facts\` to edit)
-\`c\` — chat window (first 3 + last 6)
-\`h\` — this help
-
-Use \`/dump\` for the full prompt as a \`.md\` file, \`/persona\` to edit the persona layer.`);
+/**
+ * The `/prompt h` help text, generated from {@link SYSTEM_PROMPT_PARTS} so a new prompt layer
+ * shows up in the menu the moment it's added to the catalog.
+ */
+const PROMPT_HELP = md(
+  [
+    `**🧩 /prompt** \`<part>\` — show one slice of the prompt the LLM receives`,
+    ...SYSTEM_PROMPT_PARTS.map((p) => `\`${p.aliases[0]}\` — ${p.hint}`),
+    `\`c\` — chat window (first 3 + last 6)`,
+    `\`h\` — this help`,
+    ``,
+    `Use \`/dump\` for the full prompt as a \`.md\` file, \`/persona\` to edit the persona layer.`,
+  ].join('\n'),
+);
 
 /**
  * Renders the chat window the way the LLM-facing window is shaped, but elided for a quick peek:
@@ -886,68 +857,59 @@ register({
       await reply(PROMPT_HELP);
       return;
     }
+
+    const ctx = { userName, chatId };
+
+    // The chat window isn't a system-prompt layer, so it's resolved before the catalog.
+    if (arg !== undefined && CHAT_ALIASES.includes(arg)) {
+      await replyPart(reply, 'Chat', renderChatPeek(getWindow(chatId)));
+      return;
+    }
+
     // No arg → persona; an unknown arg → the help menu (rather than guessing a part).
-    const part = arg === undefined ? 'persona' : PROMPT_PART_ALIASES[arg];
+    const part = arg === undefined ? SYSTEM_PROMPT_PARTS[0] : findPromptPart(arg);
     if (!part) {
       await reply(PROMPT_HELP);
       return;
     }
 
+    const label = part.label(ctx);
+    const body = part.render(ctx, new Date());
+
     // The facts block outgrew the 4096-char panel, so it ships as a verbatim .md file
     // (fenced, like /dump) with the same last-touched caption as /facts.
-    if (part === 'facts') {
-      const block = renderFactsBlock(chatId, userName);
-      if (!block) {
-        await reply(html`<pre>[Facts]\n(no facts yet)</pre>`);
+    if (part.key === 'facts') {
+      if (!body) {
+        await replyPart(reply, label, part.emptyNote);
         return;
       }
       await replyDocument(
-        Buffer.from(`# Facts block — as the model sees it\n\n${mdFence(block)}\n`, 'utf8'),
+        Buffer.from(`# Facts block — as the model sees it\n\n${mdFence(body)}\n`, 'utf8'),
         `prompt_facts_${fileStamp()}.md`,
         factsCaption(chatId, '🧩 Facts block — as the model sees it'),
       );
       return;
     }
 
-    const ctx = { userName, chatId };
-    let label: string;
-    let body: string;
-    switch (part) {
-      case 'persona':
-        label = 'Persona';
-        body = renderPersona(ctx);
-        break;
-      case 'appearance':
-        label = 'Appearance';
-        body = renderAppearance(ctx);
-        break;
-      case 'technical':
-        label = 'Technical';
-        body = renderTechnical(ctx);
-        break;
-      case 'tools':
-        label = 'Tools';
-        body = renderToolsBlock() || '(no tools available)';
-        break;
-      case 'summaries':
-        label = 'Summaries';
-        body = renderMemoryBlock(chatId, userName) || '(no summaries yet)';
-        break;
-      case 'chat':
-        label = 'Chat';
-        body = renderChatPeek(getWindow(chatId));
-        break;
-    }
-
-    // Telegram caps messages at 4096 chars; keep the <pre> block under that. A single part can
-    // still overflow (persona is large) — clip it and point at /dump for the untruncated dump.
-    const MAX = 3900;
-    const text = `[${label}]\n${body}`;
-    const clipped =
-      text.length > MAX ? `${text.slice(0, MAX)}\n… (truncated — use /dump for the full prompt)` : text;
-    await reply(html`<pre>${clipped}</pre>`);
+    await replyPart(reply, label, body || part.emptyNote);
   },
 });
+
+/**
+ * Sends one labelled prompt slice as a `<pre>` panel. Telegram caps messages at 4096 chars, so
+ * a part that overflows (persona is large) is clipped with a pointer at /dump for the full text.
+ */
+async function replyPart(
+  reply: (content: InputText) => Promise<void>,
+  label: string,
+  body: string,
+): Promise<void> {
+  const MAX = 3900;
+  const text = `[${label}]\n${body}`;
+  const clipped =
+    text.length > MAX ? `${text.slice(0, MAX)}\n… (truncated — use /dump for the full prompt)` : text;
+  await reply(html`<pre>${clipped}</pre>`);
+}
 
 /** The `/persona` help: the action menu, plus how it relates to `/prompt`. */
 const PERSONA_HELP = md(`**👤 /persona** — view or edit the persona layer of the system prompt
@@ -1179,20 +1141,15 @@ register({
     const tok = (s: string): number => (s ? encode(s).length : 0);
     const charName = getCharName();
 
-    // The same pieces renderSystemPrompt joins, in its exact order — the annotated dump must
-    // never drift from the live payload. Empty blocks stay in the overview (a zero row says
-    // "nothing here yet") but get no body section.
-    const nFacts = factCount(chatId);
-    const nSummaries = getRecentSummaries(chatId, config.summary.maxKept).length;
-    const sections = [
-      { emoji: '🎭', name: 'Persona', body: renderPersona(ctx) },
-      { emoji: '👀', name: 'Appearance', body: renderAppearance(ctx) },
-      { emoji: '⚙️', name: 'Technical', body: renderTechnical(ctx) },
-      { emoji: '📇', name: `Facts (${nFacts})`, body: renderFactsBlock(chatId, userName) },
-      { emoji: '🧠', name: `Memory (${nSummaries} day${nSummaries === 1 ? '' : 's'})`, body: renderMemoryBlock(chatId, userName) },
-      { emoji: '🛠️', name: 'Tools', body: renderToolsBlock() },
-      { emoji: '📸', name: 'Selfie rules', body: renderSelfieBlock(ctx, new Date()) },
-    ];
+    // Walks the same catalog renderSystemPrompt joins, in its exact order, so the annotated
+    // dump cannot drift from the live payload. Empty blocks stay in the overview (a zero row
+    // says "nothing here yet") but get no body section.
+    const now = new Date();
+    const sections = SYSTEM_PROMPT_PARTS.map((part) => ({
+      emoji: part.emoji,
+      name: part.label(ctx),
+      body: part.render(ctx, now),
+    }));
     const msgs = getWindowDetailed(chatId);
     const info = getWindowInfo(chatId);
 
@@ -1249,7 +1206,6 @@ register({
           .join('\n\n')
       : '_(no conversation yet)_';
 
-    const now = new Date();
     const doc =
       [
         `# 📄 Prompt dump — ${formatDateTime(now.getTime(), { year: true })}`,

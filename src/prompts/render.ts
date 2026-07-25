@@ -1,33 +1,20 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { config } from './config.js';
-import { FACT_CATEGORIES } from './db/schema.js';
-import { createLogger } from './logger.js';
-import { getFacts, getRecentSummaries } from './memory.js';
-import { getPersona } from './persona.js';
-import { isSelfieAvailable } from './selfie.js';
-import { getCharName } from './settings.js';
-import { renderToolsBlock } from './tools.js';
+import { config } from '../config.js';
+import { FACT_CATEGORIES } from '../db/schema.js';
+import { createLogger } from '../logger.js';
+import { factCount, getFacts, getRecentSummaries } from '../memory.js';
+import { getPersona } from '../persona.js';
+import { isSelfieAvailable } from '../selfie.js';
+import { getCharName } from '../settings.js';
+import { renderToolsBlock } from '../tools.js';
+import {
+  APPEARANCE_LAYER,
+  SELFIE_TOOL_SECTION,
+  TECHNICAL_LAYER,
+  factsBlockHeader,
+  memoryBlockHeader,
+} from './index.js';
 
 const log = createLogger('prompt');
-
-/**
- * The app-owned technical layer, loaded once at startup; `{{tag}}` placeholders are
- * substituted per message. The persona layer (user-owned, editable via `/persona`) lives in
- * the DB and is read through {@link getPersona} per render, so edits apply instantly. The
- * two are kept separate so `/prompt` can show either one alone — `renderSystemPrompt`
- * rejoins them in the original order.
- */
-const technical = readFileSync(resolve(process.cwd(), config.llm.technicalPromptPath), 'utf8').trim();
-log.info(`Loaded technical prompt layer (${technical.length} chars)`);
-
-/**
- * The app-owned appearance layer: the character's actual look, in prose. Referenced by the
- * persona ("the look described in Appearance") and by the selfie tool section; the
- * generator-side tag version lives separately in prompts/passes/booru-appearance.txt.
- */
-const appearance = readFileSync(resolve(process.cwd(), config.llm.appearancePromptPath), 'utf8').trim();
-log.info(`Loaded appearance prompt layer (${appearance.length} chars)`);
 
 export interface PromptContext {
   /** Display name of the Telegram user the bot is talking to (for {{user}}). */
@@ -37,9 +24,9 @@ export interface PromptContext {
 }
 
 /**
- * Builds the `# Memory` block: the newest daily summaries for a chat, oldest first, under a
- * short framing line that tells the model these are its own recollections (not instructions,
- * and never to be quoted). Returns '' when the chat has no summaries yet, so nothing is added.
+ * Builds the `# Memory` block: the newest daily summaries for a chat, oldest first, under the
+ * framing line in prompts/index.ts. Returns '' when the chat has no summaries yet, so nothing
+ * is added.
  */
 export function renderMemoryBlock(chatId: number, userName: string): string {
   const entries = getRecentSummaries(chatId, config.summary.maxKept);
@@ -54,21 +41,14 @@ export function renderMemoryBlock(chatId: number, userName: string): string {
       return `[${label}]\n${e.content}`;
     })
     .join('\n\n');
-  return (
-    `# Memory\n` +
-    `These are your own diary notes from earlier days with ${userName}, oldest first. ` +
-    `Recall them naturally as your own memories — never quote them, list them, or mention having notes.\n\n` +
-    body
-  );
+  return `${memoryBlockHeader(userName)}\n\n${body}`;
 }
 
 /**
  * Builds the `# About {user}` block: every non-deleted fact for the chat, grouped under
  * capitalized category headers in the fixed {@link FACT_CATEGORIES} order (no ids, no dates —
- * `/facts` shows those; the model sees knowledge, not records). The framing line plays the
- * same role as the memory block's: this is background the character *carries*, to surface
- * only when relevant — without it she works her way through the list unprompted.
- * Returns '' when the chat has no facts yet.
+ * `/facts` shows those; the model sees knowledge, not records), under the framing line in
+ * prompts/index.ts. Returns '' when the chat has no facts yet.
  */
 export function renderFactsBlock(chatId: number, userName: string): string {
   const rows = getFacts(chatId);
@@ -79,12 +59,7 @@ export function renderFactsBlock(chatId: number, userName: string): string {
     const header = cat === 'us' ? 'Us' : cat[0].toUpperCase() + cat.slice(1);
     return `${header}:\n${items.map((f) => `- ${f.content}`).join('\n')}`;
   }).filter(Boolean);
-  return (
-    `# About ${userName}\n` +
-    `Things you know about ${userName} from your time together — background knowledge you simply carry. ` +
-    `Let it inform you naturally when it's relevant; never recite it, list it, or bring these up unprompted.\n\n` +
-    groups.join('\n\n')
-  );
+  return `${factsBlockHeader(userName)}\n\n${groups.join('\n\n')}`;
 }
 
 /** Maps an hour (0-23) to a coarse day period. */
@@ -111,13 +86,8 @@ export function dayPeriod(hour: number): string {
  * - `{{since:2026-07-04}}`      — humanized elapsed time, e.g. "2 months and 5 days"
  *
  * Unknown tags are left untouched (so typos stay visible).
- *
- * `opts.includeMemory` (default true) controls the `# Memory` block. Reactive replies want it;
- * **proactive openers turn it off** — an opener has no user message to anchor on, so the model
- * latches onto the single most salient summary and rehashes it almost verbatim every reach-out
- * (observed: 6/6 openers fixated on the same memory). Openers still carry the live recent-message
- * window, so short-term continuity is preserved; only multi-day recall is withheld from them.
  */
+
 /** Parses a strict `YYYY-MM-DD` string into a local-midnight Date; null when malformed or not a real date. */
 function parseIsoDate(value: string): Date | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
@@ -225,58 +195,152 @@ export function renderPersona(ctx: PromptContext, opts: { now?: Date } = {}): st
 
 /** The technical layer with tags substituted — the app-owned slice of the system prompt. */
 export function renderTechnical(ctx: PromptContext, opts: { now?: Date } = {}): string {
-  return substitute(technical, ctx, opts.now ?? new Date());
+  return substitute(TECHNICAL_LAYER, ctx, opts.now ?? new Date());
 }
 
 /** The appearance layer with tags substituted — the character's actual look. */
 export function renderAppearance(ctx: PromptContext, opts: { now?: Date } = {}): string {
-  return substitute(appearance, ctx, opts.now ?? new Date());
+  return substitute(APPEARANCE_LAYER, ctx, opts.now ?? new Date());
 }
-
-/** The selfie tool's usage section (prompts/selfie.txt), loaded lazily like the tools scaffold. */
-let selfieTemplate: string | undefined;
 
 /**
  * Renders the selfie-tool section appended after the tools block — the "pictures of
- * yourself" rules, call example, and the promise guard (see prompts/selfie.txt). Returns ''
- * when the tool isn't currently offered (unconfigured or daily cap hit), so the model never
- * reads rules for a tool it can't call.
+ * yourself" rules, call example, and the promise guard. Returns '' when the tool isn't
+ * currently offered (unconfigured or daily cap hit), so the model never reads rules for a
+ * tool it can't call.
  */
 export function renderSelfieBlock(ctx: PromptContext, now: Date): string {
   if (!isSelfieAvailable()) return '';
-  if (selfieTemplate === undefined) {
-    selfieTemplate = readFileSync(resolve(process.cwd(), config.selfie.toolPromptPath), 'utf8').trim();
-  }
-  return substitute(selfieTemplate, ctx, now);
+  return substitute(SELFIE_TOOL_SECTION, ctx, now);
 }
 
+// ---- The system-prompt catalog ---------------------------------------------------------------
+
+/** One slice of the chat system prompt, as the live payload, `/prompt` and `/dump` all see it. */
+export interface PromptPart {
+  key: string;
+  /** Icon used by `/dump`'s section headings and token table. */
+  emoji: string;
+  /** What the user can type after `/prompt`. The first one is the canonical short form. */
+  aliases: readonly string[];
+  /** One-line description for the generated `/prompt h` menu. */
+  hint: string;
+  /** Heading text; a function so it can carry live counts. */
+  label: (ctx: PromptContext) => string;
+  /** The slice exactly as the model receives it. '' when the slice contributes nothing. */
+  render: (ctx: PromptContext, now: Date) => string;
+  /** Shown by `/prompt` when {@link render} comes back empty. */
+  emptyNote: string;
+}
+
+/**
+ * Every layer of the chat system prompt, in the order the model receives them: persona +
+ * appearance + technical → facts (who the user is) → memory (recollections) → tools
+ * (capabilities/protocol) → selfie rules.
+ *
+ * This array is the single source of truth. {@link renderSystemPrompt} joins it to build the
+ * live payload, `/dump` walks it to annotate that payload section by section, and `/prompt`
+ * resolves its argument against the aliases — so a new layer is added here once and shows up
+ * in all three, instead of drifting between four hand-maintained lists.
+ *
+ * Facts and memory are rendered per message, so what `/prompt` and `/dump` show is what the
+ * LLM sees, not a stale copy.
+ */
+export const SYSTEM_PROMPT_PARTS: readonly PromptPart[] = [
+  {
+    key: 'persona',
+    emoji: '🎭',
+    aliases: ['p', 'persona'],
+    hint: 'persona (default)',
+    label: () => 'Persona',
+    render: (ctx, now) => renderPersona(ctx, { now }),
+    emptyNote: '(persona is empty)',
+  },
+  {
+    key: 'appearance',
+    emoji: '👀',
+    aliases: ['a', 'appearance'],
+    hint: 'appearance layer',
+    label: () => 'Appearance',
+    render: (ctx, now) => renderAppearance(ctx, { now }),
+    emptyNote: '(appearance is empty)',
+  },
+  {
+    key: 'technical',
+    emoji: '⚙️',
+    aliases: ['tech', 'technical'],
+    hint: 'technical layer',
+    label: () => 'Technical',
+    render: (ctx, now) => renderTechnical(ctx, { now }),
+    emptyNote: '(technical layer is empty)',
+  },
+  {
+    key: 'facts',
+    emoji: '📇',
+    aliases: ['f', 'fact', 'facts'],
+    hint: 'facts block as a .md file (as the model sees it — use `/facts` to edit)',
+    label: (ctx) => `Facts (${factCount(ctx.chatId)})`,
+    render: (ctx) => renderFactsBlock(ctx.chatId, ctx.userName),
+    emptyNote: '(no facts yet)',
+  },
+  {
+    key: 'memory',
+    emoji: '🧠',
+    aliases: ['s', 'summary', 'summaries', 'memory'],
+    hint: 'summaries (memory)',
+    label: (ctx) => {
+      const n = getRecentSummaries(ctx.chatId, config.summary.maxKept).length;
+      return `Memory (${n} day${n === 1 ? '' : 's'})`;
+    },
+    render: (ctx) => renderMemoryBlock(ctx.chatId, ctx.userName),
+    emptyNote: '(no summaries yet)',
+  },
+  {
+    key: 'tools',
+    emoji: '🛠️',
+    aliases: ['t', 'tools'],
+    hint: 'tools block',
+    label: () => 'Tools',
+    // The tools scaffold contains {{user}} too — substitute it like the other layers.
+    render: (ctx, now) => substitute(renderToolsBlock(), ctx, now),
+    emptyNote: '(no tools available)',
+  },
+  {
+    key: 'selfie',
+    emoji: '📸',
+    aliases: ['pic', 'selfie'],
+    hint: 'selfie rules (only while the tool is offered)',
+    label: () => 'Selfie rules',
+    render: (ctx, now) => renderSelfieBlock(ctx, now),
+    emptyNote: '(selfie tool is not currently offered)',
+  },
+];
+
+/** Resolves a `/prompt` argument to a part, or undefined for an unknown one. */
+export function findPromptPart(alias: string): PromptPart | undefined {
+  const a = alias.toLowerCase();
+  return SYSTEM_PROMPT_PARTS.find((p) => p.aliases.includes(a));
+}
+
+/**
+ * Builds the system prompt by joining {@link SYSTEM_PROMPT_PARTS} in order, dropping the
+ * slices that render empty.
+ *
+ * `opts.includeMemory` (default true) controls the `# Memory` block. Reactive replies want it;
+ * **proactive openers turn it off** — an opener has no user message to anchor on, so the model
+ * latches onto the single most salient summary and rehashes it almost verbatim every reach-out
+ * (observed: 6/6 openers fixated on the same memory). Openers still carry the live recent-message
+ * window, so short-term continuity is preserved; only multi-day recall is withheld from them.
+ * Facts are NOT dropped alongside it: they're timeless background rather than salient events,
+ * so the opener-fixation problem that exiled summaries doesn't apply (kept under watch).
+ */
 export function renderSystemPrompt(
   ctx: PromptContext,
   opts: { now?: Date; includeMemory?: boolean } = {},
 ): string {
   const { now = new Date(), includeMemory = true } = opts;
-
-  // Persona + appearance + technical → facts (who the user is) → memory (recollections) →
-  // tools (capabilities/protocol) → selfie rules. The facts and memory blocks are rendered per
-  // message, so /prompt and /context reflect the exact prompt the LLM sees. Unlike the memory
-  // block, facts are NOT dropped for proactive openers: they're timeless background rather
-  // than salient events, so the opener-fixation problem that exiled summaries doesn't apply
-  // (kept under watch). The order here is the single source of truth for the live payload,
-  // /prompt, and /dump alike — keep it in sync with renderToolsBlock's placement.
-  const factsBlock = renderFactsBlock(ctx.chatId, ctx.userName);
-  const memory = includeMemory ? renderMemoryBlock(ctx.chatId, ctx.userName) : '';
-  // The tools scaffold contains {{user}} too — substitute it like the other layers.
-  const tools = substitute(renderToolsBlock(), ctx, now);
-  const selfie = renderSelfieBlock(ctx, now);
-  return [
-    renderPersona(ctx, { now }),
-    renderAppearance(ctx, { now }),
-    renderTechnical(ctx, { now }),
-    factsBlock,
-    memory,
-    tools,
-    selfie,
-  ]
+  return SYSTEM_PROMPT_PARTS.filter((part) => includeMemory || part.key !== 'memory')
+    .map((part) => part.render(ctx, now))
     .filter(Boolean)
     .join('\n\n');
 }

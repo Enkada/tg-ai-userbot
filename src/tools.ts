@@ -12,9 +12,7 @@
  * "treat your current-fact memory as unreliable" rule below, which is what made the
  * smaller model stop answering stale facts from memory in testing.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { config } from './config.js';
+import { NO_ANSWER_FALLBACK, TOOLS_SCAFFOLD } from './prompts/index.js';
 import { isSearchConfigured } from './search.js';
 import { isSelfieAvailable } from './selfie.js';
 
@@ -57,28 +55,19 @@ export function availableTools(): ToolDef[] {
   return ALL_TOOLS.filter((t) => t.available());
 }
 
-/** The tool-protocol scaffold (search rule, call syntax, example) with a {{tools}} placeholder. */
-let toolsTemplate: string | undefined;
-
 /**
- * Renders the tool section appended to the system prompt: the search-decision rule, the
- * call syntax, a worked example (all from prompts/tools.txt), and the available-tools list
- * substituted for the file's {{tools}} tag. Returns '' when no tool is available, so the
- * prompt is unchanged then. The template is read lazily and cached — code paths that only
- * parse tool calls (no prompt building) don't depend on the file existing.
+ * Renders the tool section appended to the system prompt: the {@link TOOLS_SCAFFOLD} text
+ * (search-decision rule, call syntax, worked example) with its {{tools}} tag substituted for
+ * the available-tools list. Returns '' when no tool is available, so the prompt is unchanged
+ * then.
  *
- * NOTE: the call syntax described in tools.txt is parsed by TOOL_CALL_RE below — if you
+ * NOTE: the call syntax the scaffold describes is parsed by TOOL_CALL_RE below — if you
  * change the <tool_call> protocol in one place, change it in the other.
  */
 export function renderToolsBlock(tools: ToolDef[] = availableTools()): string {
   if (tools.length === 0) return '';
-
-  if (toolsTemplate === undefined) {
-    toolsTemplate = readFileSync(resolve(process.cwd(), config.llm.toolsPromptPath), 'utf8').trim();
-  }
-
   const list = tools.map((t) => `- ${t.name}(${t.args.join(', ')}): ${t.description}`).join('\n');
-  return toolsTemplate.replace(/\{\{\s*tools\s*\}\}/g, list);
+  return TOOLS_SCAFFOLD.replace(/\{\{\s*tools\s*\}\}/g, list);
 }
 
 /** A parsed tool call from the model's output. */
@@ -142,13 +131,10 @@ export function containsFakePhotoBlock(text: string): boolean {
   return FAKE_PHOTO_RE.test(text);
 }
 
-/** Fallback shown when a reply is nothing but an (unfulfillable) tool call. */
-const NO_ANSWER = "couldn't dig that up, sorry — try rephrasing?";
-
 /**
  * Prepares a model reply for sending. If it contains a *valid* tool call (e.g. the search
  * loop hit its cap, or a context that executes the call separately), the call is stripped
- * so no raw tag reaches the chat — falling back to {@link NO_ANSWER} if nothing remains. A
+ * so no raw tag reaches the chat — falling back to {@link NO_ANSWER_FALLBACK} if nothing remains. A
  * reply with no tag, or with a *malformed* tag, is returned unchanged (sent as-is, which
  * surfaces a misbehaving model for debugging by design).
  *
@@ -158,5 +144,5 @@ const NO_ANSWER = "couldn't dig that up, sorry — try rephrasing?";
  */
 export function finalizeReply(content: string): string {
   if (!parseToolCall(content)) return content.trim();
-  return stripToolCalls(content) || NO_ANSWER;
+  return stripToolCalls(content) || NO_ANSWER_FALLBACK;
 }

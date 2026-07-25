@@ -17,12 +17,12 @@
  * ({@link summaryState}) so it survives restarts and catches up on any day missed during downtime;
  * existing history before the feature is switched on is never back-filled.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { config } from './config.js';
 import { getCharName } from './settings.js';
 import { createLogger } from './logger.js';
 import { summarize } from './providers/openrouter.js';
+import { SUMMARY_PASS, summaryPassUserMessage } from './prompts/index.js';
+import { substitute } from './prompts/render.js';
 import {
   getDayMessages,
   getSummaryState,
@@ -33,9 +33,6 @@ import {
 } from './memory.js';
 
 const log = createLogger('summary');
-
-/** The app-owned summarizer system prompt, loaded once. */
-const SUMMARY_TEMPLATE = readFileSync(resolve(process.cwd(), config.summary.promptPath), 'utf8').trim();
 
 // ---- Logical-day arithmetic --------------------------------------------------------------
 
@@ -70,9 +67,12 @@ export function prevDayStart(start: number): number {
 
 // ---- Generating one day's summary --------------------------------------------------------
 
-/** Renders the summarizer system prompt with the character/user names substituted. */
-function renderSummaryPrompt(charName: string, userName: string): string {
-  return SUMMARY_TEMPLATE.replaceAll('{{char}}', charName).replaceAll('{{user}}', userName);
+/**
+ * Renders the summarizer system prompt through the same `{{tag}}` engine as the chat layers,
+ * so this pass gets `{{char}}`/`{{user}}` (all it uses today) and the valued date tags alike.
+ */
+function renderSummaryPrompt(chatId: number, userName: string): string {
+  return substitute(SUMMARY_PASS, { userName, chatId }, new Date());
 }
 
 /**
@@ -95,8 +95,8 @@ async function summarizeDay(chatId: number, start: number, end: number): Promise
     year: 'numeric',
   });
 
-  const system = renderSummaryPrompt(charName, userName);
-  const user = `Date: ${dateLabel}\n\n<transcript>\n${transcript}\n</transcript>\n\nWrite ${charName}'s diary entry for this day.`;
+  const system = renderSummaryPrompt(chatId, userName);
+  const user = summaryPassUserMessage(dateLabel, transcript, charName);
 
   const content = (await summarize(system, user)).trim();
   // Shape guard: a valid entry carries all four labeled lines. A response that lost one —

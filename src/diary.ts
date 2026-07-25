@@ -23,8 +23,6 @@
  * as few-shot turns the model clones their structure and ruts within days (same failure
  * class as the opener/summary fixation that exiled memory from proactive openers).
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { desc, eq } from 'drizzle-orm';
 import type { TelegramClient } from '@mtcute/node';
 import { config } from './config.js';
@@ -32,7 +30,22 @@ import { createLogger } from './logger.js';
 import { db } from './db/index.js';
 import { diaryPosts, diaryState, type DiaryPostRow, type DiaryStateRow } from './db/schema.js';
 import { getSummaryState, getWindowDetailed } from './memory.js';
-import { dayPeriod, renderFactsBlock, renderMemoryBlock, renderPersona } from './prompt.js';
+import {
+  DIARY_ENTRIES_HEADER,
+  DIARY_LAYER,
+  DIARY_SPARK_WORDS,
+  diaryConversationHeader,
+  diaryCue,
+  diaryExcludeUser,
+  diaryNowLine,
+} from './prompts/index.js';
+import {
+  dayPeriod,
+  renderFactsBlock,
+  renderMemoryBlock,
+  renderPersona,
+  substitute,
+} from './prompts/render.js';
 import { diaryEntry } from './providers/openrouter.js';
 import { getCharName } from './settings.js';
 import { sanitize } from './sanitize.js';
@@ -40,19 +53,6 @@ import { finalizeReply } from './tools.js';
 import { formatDateTime } from './format.js';
 
 const log = createLogger('diary');
-
-// ---- Static assets (loaded once at startup, like the technical prompt layer) ---------------
-
-/** The diary instruction layer, `{{tag}}` placeholders intact. */
-const diaryLayerRaw = readFileSync(resolve(process.cwd(), config.diary.promptPath), 'utf8').trim();
-
-/** Curated spark words, one per line. */
-const sparkWords = readFileSync(resolve(process.cwd(), config.diary.wordsPath), 'utf8')
-  .split('\n')
-  .map((w) => w.trim())
-  .filter(Boolean);
-
-log.info(`Loaded diary layer (${diaryLayerRaw.length} chars) and ${sparkWords.length} spark words`);
 
 /** The single conversation the diary draws context from (single-user bot by design). */
 function primaryChatId(): number | undefined {
@@ -144,7 +144,7 @@ export function rollEntry(): EntryRoll {
 
 /** `n` distinct random spark words. */
 function sampleSparks(n: number): string[] {
-  const pool = [...sparkWords];
+  const pool = [...DIARY_SPARK_WORDS];
   const picked: string[] = [];
   while (picked.length < n && pool.length > 0) {
     picked.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
@@ -179,11 +179,7 @@ function renderConversationBlock(chatId: number, userName: string): string {
       t.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
     return `[${label}] ${m.role === 'user' ? userName : charName}: ${m.content}`;
   });
-  return (
-    `# Recent conversation\n` +
-    `The last stretch of your chat with ${userName}, for context only - today's entry does not have to touch it.\n\n` +
-    lines.join('\n')
-  );
+  return `${diaryConversationHeader(userName)}\n\n${lines.join('\n')}`;
 }
 
 /** Date label for a prior entry, e.g. "Friday, July 18, morning". */
@@ -195,22 +191,12 @@ function entryDateLabel(ms: number): string {
   );
 }
 
-/**
- * Prior posts as a dated reference block. The no-reuse rule rides the block header — adjacent
- * to the data it polices — because the same rule stated only in the (further-away) diary layer
- * measurably failed: run 2 of testing reproduced a near-identical opening with the rule present
- * there alone.
- */
+/** Prior posts as a dated reference block, under the no-reuse header in prompts/index.ts. */
 function renderRecentEntriesBlock(): string {
   const rows = getRecentDiaryPosts(config.diary.recentEntries);
   if (rows.length === 0) return '';
   const body = rows.map((e) => `[${entryDateLabel(e.createdAt)}]\n${e.content}`).join('\n\n');
-  return (
-    `# Your recent entries\n` +
-    `Your latest posts in this channel, oldest first. Today's entry must not reuse their ` +
-    `topics, images, phrasings, or the way any of them opens.\n\n` +
-    body
-  );
+  return `${DIARY_ENTRIES_HEADER}\n\n${body}`;
 }
 
 /**
@@ -229,13 +215,13 @@ export function buildDiarySystemPrompt(
   opts: { withConversation: boolean },
 ): string {
   const now = new Date();
-  const nowLine =
-    `Now: ${now.toLocaleDateString('en-US', { weekday: 'long' })}, ` +
-    `${now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}, ` +
-    `${dayPeriod(now.getHours())}.`;
-  const diaryLayer = diaryLayerRaw
-    .replaceAll('{{user}}', userName)
-    .replaceAll('{{char}}', getCharName());
+  const nowLine = diaryNowLine(
+    now.toLocaleDateString('en-US', { weekday: 'long' }),
+    now.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+    dayPeriod(now.getHours()),
+  );
+  // Same `{{tag}}` engine as the chat layers — the diary layer only uses {{user}} today.
+  const diaryLayer = substitute(DIARY_LAYER, { userName, chatId }, now);
   return [
     renderPersona({ userName, chatId }, { now }),
     nowLine,
@@ -256,17 +242,9 @@ export function buildDiarySystemPrompt(
  * for offline debugging only.
  */
 export function buildDiaryCue(userName: string, roll: EntryRoll): string {
-  const focus = roll.aboutUsAllowed
-    ? ''
-    : `\nLeave ${userName} out of this one entirely - he doesn't appear in this entry at all, ` +
-      `not even in passing. Write about something that's yours alone.`;
+  const focus = roll.aboutUsAllowed ? '' : diaryExcludeUser(userName);
   const sparks = sampleSparks(config.diary.sparkCount).join(', ');
-  return (
-    `[Write your next diary entry. Length this time: ${roll.length}. Mood right now: ${roll.register}.${focus}\n` +
-    `If nothing specific is already on your mind, here are random sparks - pick one and run with it, ` +
-    `or ignore them all: ${sparks}.\n` +
-    `Write the entry text only - no title, no date line, no signature.]`
-  );
+  return diaryCue(roll.length, roll.register, focus, sparks);
 }
 
 // ---- Generating & posting one entry ------------------------------------------------------------

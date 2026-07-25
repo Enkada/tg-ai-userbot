@@ -25,7 +25,14 @@ import type { InputPeerLike, TelegramClient } from '@mtcute/node';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { enqueue } from './queue.js';
-import { renderSystemPrompt } from './prompt.js';
+import {
+  continueCue,
+  continueDirectiveCue,
+  ignoredReachoutCue,
+  lullReachoutCue,
+  morningReachoutCue,
+} from './prompts/index.js';
+import { renderSystemPrompt } from './prompts/render.js';
 import { activeProviderId, type ChatResult } from './llm.js';
 import { ephemeralSearchStrategy, generateReply } from './generate.js';
 import {
@@ -92,31 +99,10 @@ function hoursSinceLastUser(chatId: number): number {
  * — to keep tone from fixating on time (a dedicated time-sense system can do that later).
  */
 function buildReachoutCue(framing: Framing, attempt: number, userName: string): string {
-  if (framing === 'morning') {
-    return (
-      `[System note: it's morning and ${userName} hasn't messaged yet — you're reaching out first. ` +
-      `Greet them warmly and gently start the day. Keep it short and natural, like a real text.]`
-    );
-  }
-  if (attempt <= 1) {
-    // First opener since they last replied: just start a thread, the way someone fires off a
-    // random text in a lull. No mention of time or them being away — substrate-neutral so it
-    // never asserts anything persona.txt is meant to own.
-    return (
-      `[System note: there's a natural lull — you're messaging ${userName} first, on your own ` +
-      `initiative. Open with whatever feels natural: something on your mind, a question for them, ` +
-      `or pick a previous thread back up. Don't comment on them being quiet or slow to reply — ` +
-      `just start, like a normal text. Keep it short.]`
-    );
-  }
-  // A prior reach-out has gone unanswered: she may let that show, but lightly — it's flavor,
-  // not the whole message, and it shouldn't fixate.
-  return (
-    `[System note: you already reached out a little while ago and ${userName} still hasn't replied. ` +
-    `You can let that show a little — mildly curious, wry, or playfully impatient, however fits you ` +
-    `— but don't dwell on it or make it the whole message; vary how you put it and mostly just keep ` +
-    `trying to reach them. Keep it short.]`
-  );
+  if (framing === 'morning') return morningReachoutCue(userName);
+  // First opener since they last replied just starts a thread; from the 2nd unanswered one on,
+  // she may notice she's been left on read. Both texts live in prompts/index.ts.
+  return attempt <= 1 ? lullReachoutCue(userName) : ignoredReachoutCue(userName);
 }
 
 /**
@@ -203,14 +189,7 @@ async function sendCued(
  */
 export function buildContinueCue(userName: string, directive: string): string {
   const d = directive.trim();
-  if (!d) {
-    return (
-      `[System note: keep the conversation going on your own - say what's on your mind or ask ` +
-      `${userName} something, or pick a previous thread back up, whatever feels natural. Don't ` +
-      `comment on them being quiet. Keep it short, like a normal text.]`
-    );
-  }
-  return `[System note: keep the conversation going: ${d}. Keep it short, like a normal text.]`;
+  return d ? continueDirectiveCue(d) : continueCue(userName);
 }
 
 /**
