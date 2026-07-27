@@ -81,6 +81,52 @@ export const attachments = sqliteTable(
 export type AttachmentRow = typeof attachments.$inferSelect;
 
 /**
+ * The rejection corpus: what the operator commands destroy, kept. `/reroll`, `/update` and
+ * `/trim` overwrite `messages.content` in place, so without this table the rejected text is
+ * gone and the stored history is a curated best-of — the nightly passes and any reply-quality
+ * analysis only ever see approved output. Each row snapshots a message's content (and its
+ * provenance) at the moment an operator action replaced it; `/delete` rows carry no snapshot
+ * (the soft-deleted row keeps its content) and exist for the note and the event itself.
+ *
+ * Append-only, **never read by any prompt** — pure debugging corpus, same pattern as
+ * {@link photoGens} and {@link diaryPosts}.cue. A reroll spree reconstructs as this table's
+ * rows for one `messageId` in `id` order, with the surviving version in {@link messages}.
+ *
+ * `note` is the operator's optional free-text reason (`/r too clingy`), expected to be sparse —
+ * analysis treats a note anywhere in a spree as covering the whole spree.
+ */
+export const messageRevisions = sqliteTable(
+  'message_revisions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** The message row the action hit (messages.id) — still live for reroll/update/trim, soft-deleted for delete. */
+    messageId: integer('message_id')
+      .notNull()
+      .references(() => messages.id),
+    /** Which operator command produced this row. */
+    action: text('action', { enum: ['reroll', 'update', 'trim', 'delete'] }).notNull(),
+    /**
+     * The message content this action replaced (pre-action snapshot). NULL for `delete`
+     * actions — and for `trim`s that removed the whole reply, which fall through to the
+     * delete path — where the row survives soft-deleted and still holds its content.
+     */
+    content: text('content'),
+    /** Provenance of the replaced content, copied from the row before the overwrite. */
+    provider: text('provider', { enum: ['llamacpp', 'openrouter'] }),
+    model: text('model'),
+    /** Operator-supplied reason, when given (`/r <note>`, `/d [N] <note>`, `/t [N] <note>`). */
+    note: text('note'),
+    /** Epoch milliseconds. */
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [index('idx_revisions_message').on(t.messageId)],
+);
+
+export type MessageRevisionRow = typeof messageRevisions.$inferSelect;
+
+/**
  * Web-search results for a message. Each row is one search (query + distilled summary)
  * the model ran while answering. Like {@link attachments}, the summary is kept here —
  * not baked into `messages.content` — and injected as a `[you already searched the web for

@@ -4,6 +4,7 @@ import {
   attachments,
   facts,
   factsState,
+  messageRevisions,
   messages,
   photoGens,
   proactiveState,
@@ -261,6 +262,41 @@ export function updateMessageContent(
   db.update(messages).set(patch).where(eq(messages.id, id)).run();
 }
 
+/** Operator action recorded in {@link messageRevisions}. */
+export type RevisionAction = 'reroll' | 'update' | 'trim' | 'delete';
+
+/**
+ * Records an operator action against a message into the rejection corpus (see
+ * {@link messageRevisions}). For content-destroying actions (`snapshot` true — the default
+ * for everything but `delete`) the row's current content/provider/model are copied first,
+ * so this must run **before** the {@link updateMessageContent} that overwrites them — and,
+ * for `/reroll`, only on the success path (a failed reroll leaves the old content live, so
+ * logging it as rejected would lie). `delete` (and the full-trim fall-through) skip the
+ * snapshot: the soft-deleted row keeps its content, only the event and note are new data.
+ */
+export function logMessageRevision(
+  messageId: number,
+  action: RevisionAction,
+  note: string | null,
+  snapshot: boolean = action !== 'delete',
+): void {
+  let content: string | null = null;
+  let provider: ProviderId | null = null;
+  let model: string | null = null;
+  if (snapshot) {
+    const row = db
+      .select({ content: messages.content, provider: messages.provider, model: messages.model })
+      .from(messages)
+      .where(eq(messages.id, messageId))
+      .get();
+    if (!row) return; // nothing to snapshot — don't record a revision of a missing row
+    content = row.content;
+    provider = row.provider;
+    model = row.model;
+  }
+  db.insert(messageRevisions).values({ messageId, action, content, provider, model, note }).run();
+}
+
 /**
  * Display name used inside photo cues, from the per-chat cache kept by
  * {@link rememberUserName} (written on every incoming message, so any chat that has photo
@@ -483,6 +519,8 @@ export function getWindowInfo(chatId: number): WindowInfo {
 export interface DeleteResult {
   /** How many memory rows were flagged deleted. */
   flagged: number;
+  /** Row ids (messages.id) of the flagged rows, newest first (for the revision log). */
+  ids: number[];
   /** Telegram message ids of every bubble of the flagged rows (for revoking them in the chat). */
   tgMessageIds: number[];
 }
@@ -501,7 +539,7 @@ export function deleteLastMessages(chatId: number, n: number): DeleteResult {
     .orderBy(desc(messages.id))
     .limit(n)
     .all();
-  if (rows.length === 0) return { flagged: 0, tgMessageIds: [] };
+  if (rows.length === 0) return { flagged: 0, ids: [], tgMessageIds: [] };
 
   db.update(messages)
     .set({ deleted: true })
@@ -509,7 +547,7 @@ export function deleteLastMessages(chatId: number, n: number): DeleteResult {
     .run();
 
   const tgMessageIds = rows.flatMap((r) => r.tgMessageIds ?? []);
-  return { flagged: rows.length, tgMessageIds };
+  return { flagged: rows.length, ids: rows.map((r) => r.id), tgMessageIds };
 }
 
 // ---- Long-term memory: per-day summaries ------------------------------------------------

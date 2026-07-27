@@ -26,6 +26,7 @@ import {
   getWindowInfo,
   hasPhotoGen,
   lastPhotoGen,
+  logMessageRevision,
   messageCount,
   photosToday,
   resetMemory,
@@ -286,20 +287,29 @@ Free-tier key: **${freeTier}**`),
 register({
   name: 'delete',
   aliases: ['d'],
-  description: 'Delete the last N messages for both sides (default 1): /d [N]',
+  description: 'Delete the last N messages for both sides (default 1): /d [N] [reason]',
   handler: async ({ client, msg, reply, chatId, args }) => {
-    const n = args.length ? Number(args[0]) : 1;
-    if (!Number.isInteger(n) || n < 1) {
-      await reply(md('Usage: `/d [N]` — deletes the last N messages (default 1).'));
+    // `/d [N] [reason…]` — a leading integer is N, everything after is a free-text note
+    // for the revision log. A non-numeric first token means N=1 and the whole args is
+    // the note (a note genuinely starting with a number is the accepted ambiguity).
+    const hasN = args.length > 0 && /^\d+$/.test(args[0]);
+    const n = hasN ? Number(args[0]) : 1;
+    if (n < 1) {
+      await reply(md('Usage: `/d [N] [reason]` — deletes the last N messages (default 1).'));
       return;
     }
+    const note = (hasN ? args.slice(1) : args).join(' ').trim() || null;
 
     // Soft-flag the rows (like /nuke), then revoke those messages in the chat.
-    const { flagged, tgMessageIds } = deleteLastMessages(chatId, n);
+    const { flagged, ids, tgMessageIds } = deleteLastMessages(chatId, n);
     if (flagged === 0) {
       await reply('Nothing to delete.');
       return;
     }
+    // One revision row per flagged message — no content snapshot (the soft-deleted row
+    // keeps its text); the new data is the event and the note. Note: /d spans both roles,
+    // so analysis must join back to messages.role before pooling with reroll/trim data.
+    for (const id of ids) logMessageRevision(id, 'delete', note);
     if (tgMessageIds.length) {
       await client.deleteMessagesById(msg.chat, tgMessageIds, { revoke: true }).catch(() => {});
     }
@@ -310,13 +320,16 @@ register({
 register({
   name: 'trim',
   aliases: ['t'],
-  description: "Trim the last N bubbles off my most recent reply (default 1): /t [N]",
+  description: "Trim the last N bubbles off my most recent reply (default 1): /t [N] [reason]",
   handler: async ({ client, msg, reply, chatId, args }) => {
-    const n = args.length ? Number(args[0]) : 1;
-    if (!Number.isInteger(n) || n < 1) {
-      await reply(md('Usage: `/t [N]` — trims the last N bubbles off my most recent reply (default 1).'));
+    // `/t [N] [reason…]` — same shape as /d: leading integer is N, the rest is a note.
+    const hasN = args.length > 0 && /^\d+$/.test(args[0]);
+    const n = hasN ? Number(args[0]) : 1;
+    if (n < 1) {
+      await reply(md('Usage: `/t [N] [reason]` — trims the last N bubbles off my most recent reply (default 1).'));
       return;
     }
+    const note = (hasN ? args.slice(1) : args).join(' ').trim() || null;
     // Only trim when the reply is genuinely the last turn (like /reroll); a newer user message
     // would make "the last reply" ambiguous.
     if (getLastRole(chatId) !== 'assistant') {
@@ -351,9 +364,12 @@ register({
     }
 
     // Trimming the whole reply (or more) is just a full delete — reuse the /delete path so the row
-    // is flagged and every bubble revoked, consistent with `/d 1`.
+    // is flagged and every bubble revoked, consistent with `/d 1`. Logged as the 'trim' the
+    // operator typed, but without a snapshot (delete-style): the row survives with its content,
+    // and the empty snapshot is the signal that it did.
     if (n >= pieces.length) {
-      const { tgMessageIds } = deleteLastMessages(chatId, 1);
+      const { ids, tgMessageIds } = deleteLastMessages(chatId, 1);
+      for (const id of ids) logMessageRevision(id, 'trim', note, false);
       if (tgMessageIds.length) {
         await client.deleteMessagesById(msg.chat, tgMessageIds, { revoke: true }).catch(() => {});
       }
@@ -366,6 +382,8 @@ register({
     const dropIds = ids.slice(ids.length - n);
     const keepIds = ids.slice(0, ids.length - n);
     await client.deleteMessagesById(msg.chat, dropIds, { revoke: true }).catch(() => {});
+    // Snapshot the full pre-trim reply into the revision log before the overwrite destroys it.
+    logMessageRevision(last.id, 'trim', note);
     updateMessageContent(last.id, pieces.slice(0, pieces.length - n).join('\n'), undefined, keepIds);
     // No confirmation — the bubbles vanishing is the feedback (like /d).
   },
@@ -422,8 +440,10 @@ register({
 register({
   name: 'reroll',
   aliases: ['r'],
-  description: 'Regenerate the last reply, editing it in place',
-  handler: async ({ client, msg, reply, dropPanel, chatId, userName }) => {
+  description: 'Regenerate the last reply, editing it in place: /r [reason]',
+  handler: async ({ client, msg, reply, dropPanel, chatId, userName, rawArgs }) => {
+    // `/r [reason…]` — everything after the command is a free-text note for the revision log.
+    const note = rawArgs.trim() || null;
     const last = getLastAssistant(chatId);
     if (!last) {
       await reply('Nothing to reroll — no previous reply.');
@@ -503,6 +523,10 @@ register({
       await reply('⚠️ Could not send the rerolled reply.');
       return;
     }
+    // The reroll succeeded — the old content is about to be overwritten, so this is the
+    // moment it becomes a rejection. On the failure paths above the row still holds the
+    // old text as the live reply, and logging it as rejected would lie.
+    logMessageRevision(last.id, 'reroll', note);
     // Repoint the existing record (no new row) at the fresh bubbles, refreshing provenance
     // to the model that just regenerated it.
     updateMessageContent(
@@ -555,6 +579,8 @@ register({
       return;
     }
     await client.deleteMessagesById(msg.chat, last.tgMessageIds, { revoke: true }).catch(() => {});
+    // No note for /u — its args ARE the replacement text; the old→new diff is the reason.
+    logMessageRevision(last.id, 'update', null);
     updateMessageContent(last.id, text, null, [sent.id]);
     // Like /r: the replacement text is the output — clear any open panel with the swap.
     await dropPanel();
