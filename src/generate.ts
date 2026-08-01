@@ -20,7 +20,8 @@ import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { chat, type ChatMessage, type ChatResult } from './llm.js';
 import { getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
-import { REPLY_FORMAT_CUE, SELFIE_FORMAT_CUE } from './prompts/index.js';
+import { SELFIE_FORMAT_CUE, replyFormatCue, rerollAngleCue } from './prompts/index.js';
+import { dayPeriod } from './prompts/render.js';
 import { isSearchConfigured, webSearch } from './search.js';
 import { isSelfieAvailable } from './selfie.js';
 import { parseToolCall } from './tools.js';
@@ -91,19 +92,27 @@ export async function generateReply(
 }
 
 /**
- * Returns `history` with {@link REPLY_FORMAT_CUE} appended to the trailing user turn — after
+ * Returns `history` with {@link replyFormatCue} appended to the trailing user turn — after
  * the photo/search blocks getWindow already composed into it. No-op when the last turn isn't
  * a user message. Proactive openers never pass through here: their director cue carries its
  * own "keep it short", and stacking both would double-cue the turn.
  */
-export function withReplyCue(history: ChatMessage[]): ChatMessage[] {
+export function withReplyCue(
+  history: ChatMessage[],
+  userName: string,
+  opts: { now?: Date; angle?: string } = {},
+): ChatMessage[] {
   const last = history[history.length - 1];
   if (!last || last.role !== 'user') return history;
+  const now = opts.now ?? new Date();
+  // Order inside the bracket is load-bearing (see replyFormatCue): length rule → anti-echo →
+  // clock → reroll angle → selfie sentence, which stays last. Each part is spliced before the
+  // closing `]` in turn.
+  let cue = replyFormatCue(userName, now, dayPeriod(now.getHours()));
+  if (opts.angle) cue = `${cue.slice(0, -1)}${rerollAngleCue(userName, opts.angle)}]`;
   // The selfie sentence joins the cue only while the tool is actually offered — otherwise
   // it would instruct the model to call a tool that isn't in its list.
-  const cue = isSelfieAvailable()
-    ? `${REPLY_FORMAT_CUE.slice(0, -1)}${SELFIE_FORMAT_CUE}]`
-    : REPLY_FORMAT_CUE;
+  if (isSelfieAvailable()) cue = `${cue.slice(0, -1)}${SELFIE_FORMAT_CUE}]`;
   return [...history.slice(0, -1), { role: 'user', content: `${last.content}\n${cue}` }];
 }
 
@@ -111,11 +120,15 @@ export function withReplyCue(history: ChatMessage[]): ChatMessage[] {
  * Reactive strategy: persist each search against the triggering user message (`userRowId`)
  * and rebuild the window from the DB, so the result is injected as a `[you already searched
  * the web …]` block on that turn and carried into future context. The rebuilt window gets
- * the format cue on its final user turn (see {@link REPLY_FORMAT_CUE}).
+ * the format cue on its final user turn (see {@link replyFormatCue}).
  */
-export function persistedSearchStrategy(chatId: number, userRowId: number): ToolLoopStrategy {
+export function persistedSearchStrategy(
+  chatId: number,
+  userRowId: number,
+  userName: string,
+): ToolLoopStrategy {
   return {
-    buildHistory: () => withReplyCue(getWindow(chatId)),
+    buildHistory: () => withReplyCue(getWindow(chatId), userName),
     recordSearch: (idx, query, summary) => saveSearch(userRowId, idx, query, summary),
   };
 }

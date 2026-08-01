@@ -26,11 +26,13 @@ import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { enqueue } from './queue.js';
 import {
+  OPENER_SHAPES,
   continueCue,
   continueDirectiveCue,
   ignoredReachoutCue,
   lullReachoutCue,
   morningReachoutCue,
+  recentOpenersClause,
 } from './prompts/index.js';
 import { renderSystemPrompt } from './prompts/render.js';
 import { activeProviderId, type ChatResult } from './llm.js';
@@ -38,6 +40,7 @@ import { ephemeralSearchStrategy, generateReply } from './generate.js';
 import {
   getLastUserMessageAt,
   getProactiveState,
+  getRecentOpeners,
   saveMessage,
   upsertProactiveState,
 } from './memory.js';
@@ -98,11 +101,31 @@ function hoursSinceLastUser(chatId: number): number {
  * attempt number are deliberately *not* fed in — only the on/off "a prior one went unanswered"
  * — to keep tone from fixating on time (a dedicated time-sense system can do that later).
  */
-function buildReachoutCue(framing: Framing, attempt: number, userName: string): string {
-  if (framing === 'morning') return morningReachoutCue(userName);
+function buildReachoutCue(chatId: number, framing: Framing, attempt: number, userName: string): string {
+  // The openers she has already sent, soft-deleted ones included, so she can avoid repeating
+  // herself — the window alone can't tell her, because a deleted opener leaves it entirely.
+  const openers = recentOpenersClause(getRecentOpeners(chatId, config.proactive.recentOpenersShown));
+  if (framing === 'morning') return morningReachoutCue(userName, openers);
   // First opener since they last replied just starts a thread; from the 2nd unanswered one on,
   // she may notice she's been left on read. Both texts live in prompts/index.ts.
-  return attempt <= 1 ? lullReachoutCue(userName) : ignoredReachoutCue(userName);
+  return attempt <= 1
+    ? lullReachoutCue(userName, rollOpenerShape(userName), openers)
+    : ignoredReachoutCue(userName, openers);
+}
+
+/**
+ * Picks one weighted opener shape for a lull reach-out. Rolled here, in code, rather than offered
+ * to the model as a list of options — see {@link OPENER_SHAPES} for the measurement, and
+ * {@link diaryCue} for the same pattern: given a menu, the model picks the same item every time.
+ */
+function rollOpenerShape(userName: string): string {
+  const total = OPENER_SHAPES.reduce((n, s) => n + s.weight, 0);
+  let roll = Math.random() * total;
+  for (const entry of OPENER_SHAPES) {
+    roll -= entry.weight;
+    if (roll < 0) return entry.shape(userName);
+  }
+  return OPENER_SHAPES[0].shape(userName);
 }
 
 /**
@@ -220,7 +243,7 @@ async function sendReachout(
   attempt: number,
   userName: string,
 ): Promise<void> {
-  const cue = buildReachoutCue(framing, attempt, userName);
+  const cue = buildReachoutCue(chatId, framing, attempt, userName);
   // Openers omit the long-term-memory block: with no user message to anchor on, the model fixates
   // on the most salient summary and rehashes it every reach-out (see renderSystemPrompt). The live
   // recent-message window still grounds short-term continuity. Stored proactive (the reach-out guard).
