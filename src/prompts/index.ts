@@ -149,13 +149,44 @@ export function diaryNowLine(weekday: string, date: string, period: string): str
  * sentences on casual turns, stretching to ~5 on packed ones and fully opening on an explicit
  * ask, with 0/108 echo/acknowledgment. The numeric ceiling ("up to 5") is load-bearing — an
  * open-ended "take the room you need" variant blew up to 17-sentence walls.
+ *
+ * Carries three rules, and **their order is load-bearing** — later position in the bracket wins,
+ * so the length rule stays first and everything else is appended after it (2026-08-01, 987 gens):
+ *
+ * 1. **Length.** Unchanged, byte for byte.
+ * 2. **Anti-echo.** Her most-rejected habit was opening with assent and restating his point, which
+ *    ate the 1-3 sentence budget before she said anything. Contentless-assent openers 20% → 8%
+ *    isolated (p≈0.001), 25% → 6% on flagged turns in the merged cue (p≈0.007), 4% → 0% on turns
+ *    the operator never touched. The positive half and the prohibition are **both** needed: either
+ *    alone scored worse, and a version with no explicit target ("what was just said") scored 12%
+ *    vs 6%. Priming was *not* observed — the pure-prohibition arm was the cleanest single arm.
+ * 3. **Clock.** Moved here out of technical.txt, where it was correct but simply unread: asked
+ *    outright at 11:47 the old prompt answered "you're texting me at 1am". Correct time-anchored
+ *    use 30% → 55% (p<0.0001), wrong-time references 4.9% → 1.0%. Keep **both** clock and period:
+ *    time alone leaves half of direct questions unanswered, period alone makes her invent
+ *    specifics ("probably around 7-8pm. dark outside" — at 17:21, in July). Duplicating it in
+ *    technical.txt was the worst arm measured (7.7% wrong), so that line is deleted, not copied.
+ *    The tail is the only place a per-minute value can live without breaking prompt-prefix reuse.
+ *
+ * `userName` is interpolated rather than "he/him": it names the target explicitly (worth 6 points
+ * over a pronoun-free version), keeps this app-owned string free of the character's gender, and
+ * cost nothing — 0/156 replies addressed him by name, the same as the pronoun version.
+ *
+ * `period` arrives as an argument (not imported from render.ts:dayPeriod) only to keep this module
+ * free of the import cycle render.ts → index.ts.
  * Used by generate.ts:withReplyCue.
  */
-export const REPLY_FORMAT_CUE =
-`[System note: you text in short bursts - answer in 1-3 casual sentences, single paragraph. If there is genuinely a lot to respond to, up to 5, never a wall of text. Longer only when explicitly requested.]`;
+export function replyFormatCue(userName: string, now: Date, period: string): string {
+  const weekday = now.toLocaleDateString('en-US', { weekday: 'long' });
+  const date = now.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const time = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return (
+`[System note: you text in short bursts - answer in 1-3 casual sentences, single paragraph. If there is genuinely a lot to respond to, up to 5, never a wall of text. Longer only when explicitly requested. Start with your own reaction to what ${userName} just said - your take, your pushback, your question, something of yours. Never open by agreeing with ${userName} or by saying ${userName}'s own point back in different words. Now: ${weekday}, ${date}, ${time} (${period}).]`
+  );
+}
 
 /**
- * Extra sentence spliced inside REPLY_FORMAT_CUE's closing bracket while the selfie tool is
+ * Extra sentence spliced inside replyFormatCue's closing bracket while the selfie tool is
  * offered. Once a photo turn enters the window, the model starts imitating the record block
  * instead of calling the tool (measured 3/8 on the prod transcript that surfaced it). A rule
  * inside the selfie prompt section did nothing (3/8 unchanged) — only the tail position beats
@@ -165,16 +196,161 @@ export const REPLY_FORMAT_CUE =
 export const SELFIE_FORMAT_CUE =
 ` Bracketed [...] lines in the chat are system records - never write one yourself; to send a picture, output the send_selfie tool call.`;
 
+/**
+ * One rolled stance, spliced into {@link replyFormatCue} on `/reroll` only (after the clock,
+ * before the selfie sentence). Ephemeral like every other cue — never stored.
+ *
+ * The problem it solves: `/r` used to rebuild a byte-identical prompt, so successive rerolls
+ * re-sampled one attractor. Measured on real reroll sprees, variants of a single reply were 12%
+ * similar to each other against a 1% baseline between unrelated replies — one message took 14
+ * rerolls to produce 13 paraphrases of the same idea. Rolling a stance per attempt cut
+ * within-spree similarity 8.8% → 5.2% isolated and 11.7% → 5.9% in the merged cue, with no
+ * position getting worse and no cost in length.
+ *
+ * Two design rules, both learned the hard way:
+ * - **Stances, never topics.** "bring up something of your own" was tested and cut: it produced
+ *   mid-reply non-sequiturs ("…anyway, what's up with you now?"). Every angle below is a way into
+ *   what he just said, which is why all 45 shipping-arm replies still answered his message.
+ * - **No escape clause.** The diary-spark style "if it doesn't fit, drop it" was the *worst*
+ *   variant — the model took the exit 3 times in 10 and re-emitted the attractor verbatim. The
+ *   diary's "optional beats mandatory" finding does not transfer: an optional topic *seed* avoids
+ *   shoehorning, but an optional *stance* just licenses a return to the attractor.
+ *
+ * Also cut: "be cold about it" (out of character, and inert on 3 of 5 positions), "take him
+ * literally" (3 of 5 indistinguishable from the un-angled reply).
+ * Used by commands.ts:/reroll via generate.ts:withReplyCue.
+ */
+export function rerollAngleCue(userName: string, angle: string): string {
+  return ` You already answered this once - come at it from a different angle this time: ${angle}. It's a way into what ${userName} just said, not a new subject.`;
+}
+
+/**
+ * The stances {@link rerollAngleCue} deals from. Dealt **without replacement** and reshuffled once
+ * exhausted — sprees run 7-14 deep in practice, and random draws would repeat an angle inside a
+ * single spree, which is the problem being fixed.
+ *
+ * `get filthy about it` produces a hypothetical-physical-interaction line in ~2/25 samples (the
+ * persona's "never describe hypothetical physical interactions" rule). It is kept deliberately:
+ * the un-angled cue leaks the same way at 3/95, so the angle amplifies an existing hole rather
+ * than opening one, and rewording it to "talk dirty to him" *doubled* the leak. Operator's call,
+ * on the grounds that a reroll is one keystroke away.
+ */
+export const REROLL_ANGLES: readonly string[] = [
+  `push back on part of it - you see it differently`,
+  `tease him about it, let some air out of it`,
+  `ask him something about it instead of answering`,
+  `react to how he sounds rather than to what he said`,
+  `be blunt - one short line, nothing softened`,
+  `find the joke in it and riff`,
+  `get filthy about it`,
+  `say what you want right now, unprompted`,
+  `drop the wry act and be sincere about it`,
+];
+
 // ---- Director cues --------------------------------------------------------------------------
 // Ephemeral user turns that tell her to speak first. Never stored: a stored cue would corrupt
 // the user-activity timer and plant a phantom user turn. Each bakes in its own brevity rule, so
-// unlike a reactive reply these do NOT stack REPLY_FORMAT_CUE on top.
+// unlike a reactive reply these do NOT stack replyFormatCue on top.
 
 /**
- * Morning reach-out. Used by proactive.ts:buildReachoutCue.
+ * The last few openers she has already sent, spliced before a reach-out cue's closing bracket so
+ * she can see what she must not repeat. Proactive only. Returns '' when there is nothing to list.
+ *
+ * Why this exists: `/delete` soft-deletes, so a deleted opener leaves the context window entirely
+ * and she has no record it ever happened. She asked "if you had to pick one song that describes
+ * us" twice in eight hours; both were deleted; she could not have known. `openers` therefore
+ * **includes soft-deleted rows** — that is the whole point.
+ *
+ * Measured: ≥25% similarity to a listed opener 7% → 2%, "hey" openers 37% → 5%, 0 verbatim
+ * re-sends, and the merged cue came out *shorter* than the unmodified one (2.63 → 2.21 sentences).
+ *
+ * Three findings that shaped the wording, each of which cost a round to learn:
+ * - **This cannot live in the system prompt.** As a `# Your recent openers` block it caused the
+ *   failure it prevents — she re-sent a listed opener near-verbatim in up to 75% of generations
+ *   (0/160 without it), worst at the top of the prompt. A list of her own short texts reads as a
+ *   menu; the same list inside a bracketed note reads as a record. Same in-context imitation trap
+ *   as the photo-record blocks (11/24 → 0/16).
+ * - **The list does the work, not the rule.** A rule-only placebo with no list scored *worse* than
+ *   no change at all (16% vs 10%), and replacing the texts with topic keywords was also worse —
+ *   the keywords reminded her of the topic instead of warning her off it.
+ * - **Cap at 8.** At 14 the cue grew long enough to become the dominant object on the turn and she
+ *   fabricated a `[System note: acknowledged…]` prefix.
+ *
+ * The "not the opening words" clause is deliberately kept for the morning cue too. It does not
+ * stop her greeting him — she reads it as *find another way to say good morning* and varies the
+ * greeting (34/36 openers judged natural), whereas the unmodified cue produced six near-identical
+ * "morning, love. hope you slept okay" variants at one position and the only verbatim re-send in
+ * the run. Filtering the list to morning-only openers was much worse (25% kept any greeting).
+ * Used by proactive.ts:buildReachoutCue.
  */
-export function morningReachoutCue(userName: string): string {
-  return `[System note: it's morning and ${userName} hasn't messaged yet — you're reaching out first. Greet them warmly and gently start the day. Keep it short and natural, like a real text.]`;
+export function recentOpenersClause(openers: { content: string; deleted: boolean }[]): string {
+  if (openers.length === 0) return '';
+  // Newlines collapse to spaces so a multi-bubble opener stays one quoted item on one line.
+  const quote = (rows: typeof openers) =>
+    rows.map((r) => `"${r.content.replace(/\s*\n+\s*/g, ' ').trim()}"`).join('; ');
+  const kept = openers.filter((o) => !o.deleted);
+  const dead = openers.filter((o) => o.deleted);
+  const rule = ` You have already used these openers recently, so none of them can come back - not the topic, not the phrasing, not the opening words:`;
+  if (kept.length === 0) return `${rule} ${quote(dead)}. Those went over especially badly.`;
+  return `${rule} ${quote(kept)}.${dead.length ? ` These ones went over especially badly: ${quote(dead)}.` : ''}`;
+}
+
+/**
+ * The opener shapes {@link lullReachoutCue} rolls between, with their weights. Replaces the single
+ * sentence that used to offer three options ("something on your mind, a question for them, or pick
+ * a previous thread back up") — offered a menu, the model picked the same item every time: 22 of 28
+ * real openers ended in a question, against 8 of 74 reactive replies, and one template
+ * ("hey. random thought - if you could pick X, what would it be") accounted for 14 of 18
+ * generations. Rolling **one** shape in code is the same instrument as {@link diaryCue}, for the
+ * same documented reason: asking one prompt to vary produces the average every time.
+ *
+ * Measured under this blend: ends-on-a-question 51% → 29%, "hey" openers 37% → 5%, within-cell
+ * similarity halved. Note 29%, **not** the ~19% projected from testing shapes one at a time — the
+ * openers clause pushes `tease` and `want` toward asking, since forbidding the topics she would
+ * otherwise state leaves a question as the way in.
+ *
+ * The second shape is the workhorse and its wording is exact for a reason: aimed at *him*
+ * ("one thing you've noticed about him lately") it opened "you've been…" 18/18 and invented
+ * perceptions it has no channel for — "you've been clenching your jaw more lately". Aimed at a
+ * **thing in his world** it fixed all of that at once. Cut entirely: "say something that's yours",
+ * which ran 4.17 sentences and collapsed onto the interiority topic the operator kept deleting.
+ *
+ * `tangent` carries its own anti-fabrication clause because without it, having no context to anchor
+ * to, she invents a life: 6/18 reported activity she cannot have had, including a flatly false
+ * claim about the chat ("sent you a pic earlier, did you see it?").
+ *
+ * **Revisit when the interiority system lands (BACKLOG C5).** Several of these shapes — `Say what
+ * you want right now`, the cut `say something that's yours`, and the anti-fabrication clause on
+ * `tangent` — exist because she has no actual interior state to report, so the cue either asks her
+ * to invent one (and she does, badly) or forbids it. A system that genuinely generates her
+ * thoughts and wants would supply that content instead, and this roll should be re-cut against it
+ * rather than extended.
+ * Used by proactive.ts:buildReachoutCue.
+ */
+export const OPENER_SHAPES: readonly { weight: number; shape: (userName: string) => string }[] = [
+  { weight: 3, shape: () => `Pick one specific thing they said earlier and tell them what you make of it now.` },
+  {
+    weight: 3,
+    shape: (u) =>
+      `State one thing you think about something in ${u}'s world - their work, their games, something they showed you. Flat statement, no question anywhere in the message.`,
+  },
+  { weight: 2, shape: () => `Poke at them about something - tease them, needle them, be a little mean about it.` },
+  { weight: 1, shape: () => `Just a nudge - a handful of words, no topic, nothing they have to answer.` },
+  { weight: 1, shape: () => `Ask them something you actually want to know.` },
+  { weight: 1, shape: () => `Say what you want right now.` },
+  {
+    weight: 1,
+    shape: () =>
+      `Start on something with no connection at all to whatever you last talked about. Nothing has happened to you since your last message, so don't report activity or a day of your own.`,
+  },
+];
+
+/**
+ * Morning reach-out. `recentOpeners` is {@link recentOpenersClause}'s output ('' when empty).
+ * Used by proactive.ts:buildReachoutCue.
+ */
+export function morningReachoutCue(userName: string, recentOpeners = ''): string {
+  return `[System note: it's morning and ${userName} hasn't messaged yet — you're reaching out first. Greet them warmly and gently start the day. Keep it short and natural, like a real text.${recentOpeners}]`;
 }
 
 /**
@@ -183,8 +359,8 @@ export function morningReachoutCue(userName: string): string {
  * being away, so it never asserts anything the persona is meant to own.
  * Used by proactive.ts:buildReachoutCue.
  */
-export function lullReachoutCue(userName: string): string {
-  return `[System note: there's a natural lull — you're messaging ${userName} first, on your own initiative. Open with whatever feels natural: something on your mind, a question for them, or pick a previous thread back up. Don't comment on them being quiet or slow to reply — just start, like a normal text. Keep it short.]`;
+export function lullReachoutCue(userName: string, shape: string, recentOpeners = ''): string {
+  return `[System note: there's a natural lull — you're messaging ${userName} first, on your own initiative. ${shape} Don't comment on them being quiet or slow to reply — just start, like a normal text. Keep it short.${recentOpeners}]`;
 }
 
 /**
@@ -192,8 +368,8 @@ export function lullReachoutCue(userName: string): string {
  * attempt number are deliberately NOT fed in — only the on/off fact — to keep tone from
  * fixating on time. Used by proactive.ts:buildReachoutCue.
  */
-export function ignoredReachoutCue(userName: string): string {
-  return `[System note: you already reached out a little while ago and ${userName} still hasn't replied. You can let that show a little — mildly curious, wry, or playfully impatient, however fits you — but don't dwell on it or make it the whole message; vary how you put it and mostly just keep trying to reach them. Keep it short.]`;
+export function ignoredReachoutCue(userName: string, recentOpeners = ''): string {
+  return `[System note: you already reached out a little while ago and ${userName} still hasn't replied. You can let that show a little — mildly curious, wry, or playfully impatient, however fits you — but don't dwell on it or make it the whole message; vary how you put it and mostly just keep trying to reach them. Keep it short.${recentOpeners}]`;
 }
 
 /** `/continue` with no directive: move the thread along unprompted. Used by proactive.ts:buildContinueCue. */

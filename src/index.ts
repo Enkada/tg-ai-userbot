@@ -255,7 +255,7 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
       // streaming prose bubbles and running any web_search tool calls before it answers.
       const result = await generateReply(
         systemPrompt,
-        persistedSearchStrategy(chatId, userRowId),
+        persistedSearchStrategy(chatId, userRowId, userName),
         `chat ${chatId}`,
         sink,
         controller.signal,

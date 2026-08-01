@@ -39,6 +39,7 @@ import {
 } from './memory.js';
 import { FACT_CATEGORIES, type FactCategory } from './db/schema.js';
 import { withReplyCue } from './generate.js';
+import { REROLL_ANGLES } from './prompts/index.js';
 import { forgetDebris, trackDebris } from './panel.js';
 import {
   ackLine,
@@ -437,6 +438,31 @@ register({
   },
 });
 
+/**
+ * Undealt reroll angles per message row, so a spree walks the whole list before repeating one.
+ *
+ * Dealing without replacement (rather than rolling independently each time) is deliberate: real
+ * sprees run 7-14 rerolls deep, and independent draws from 9 angles would repeat one inside a
+ * single spree — which is the attractor problem being fixed. Keyed by `messages.id`; an entry is
+ * only ever a few strings and is dropped once the reply is accepted, so the map stays tiny.
+ */
+const rerollAngleBag = new Map<number, string[]>();
+
+/** Next unused angle for this message, reshuffling once all nine have been dealt. */
+function nextRerollAngle(messageId: number): string {
+  let bag = rerollAngleBag.get(messageId);
+  if (!bag || bag.length === 0) {
+    bag = [...REROLL_ANGLES];
+    // Fisher-Yates, so the order a spree explores differs run to run.
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    rerollAngleBag.set(messageId, bag);
+  }
+  return bag.pop()!;
+}
+
 register({
   name: 'reroll',
   aliases: ['r'],
@@ -472,7 +498,10 @@ register({
     // first-pass reply gets, so a reroll can't come back as a wall of text.
     const history = getWindow(chatId);
     while (history.length && history[history.length - 1].role === 'assistant') history.pop();
-    const rerollHistory = withReplyCue(history);
+    // Each reroll carries a different rolled stance, so a spree explores instead of re-sampling
+    // one attractor (see prompts/index.ts:rerollAngleCue). The angle is ephemeral like every
+    // other cue — nothing about it is stored, including on the revision row.
+    const rerollHistory = withReplyCue(history, userName, { angle: nextRerollAngle(last.id) });
 
     const systemPrompt = renderSystemPrompt({ userName, chatId });
     const oldIds = last.tgMessageIds;

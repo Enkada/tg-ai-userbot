@@ -263,6 +263,13 @@ export const config = {
      */
     maxIgnored: numberEnv('PROACTIVE_MAX_IGNORED', 8),
     /**
+     * How many of her own recent openers are listed back to her in the reach-out cue, so she
+     * doesn't repeat one (see prompts/index.ts:recentOpenersClause). **Do not raise past ~8**:
+     * at 14 the cue became the longest thing on the turn and she began fabricating a
+     * `[System note: …]` prefix of her own.
+     */
+    recentOpenersShown: numberEnv('PROACTIVE_RECENT_OPENERS', 8),
+    /**
      * How often the scheduler evaluates each chat (ms). Default 1 min — fine enough granularity
      * for the reach-out gaps; the tick is cheap (a DB read, no LLM call).
      */

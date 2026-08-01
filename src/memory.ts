@@ -189,6 +189,32 @@ export function getLastUserMessageAt(chatId: number): number | null {
   return row?.at ?? null;
 }
 
+/**
+ * The last `limit` proactive openers she sent in a chat, oldest first, for the anti-repetition
+ * clause in the reach-out cue (see {@link recentOpenersClause}).
+ *
+ * **Deliberately ignores the `deleted` flag** — the opposite of every other read in this module.
+ * A deleted opener is precisely the one she must not send again, and soft-deleting it removes it
+ * from the context window, so without this she has no record it ever happened (observed: the same
+ * question asked twice in eight hours, both deleted). The flag is returned so the cue can mark
+ * which ones the operator threw away.
+ */
+export function getRecentOpeners(
+  chatId: number,
+  limit: number,
+): { content: string; deleted: boolean }[] {
+  const rows = db
+    .select({ content: messages.content, deleted: messages.deleted })
+    .from(messages)
+    .where(
+      and(eq(messages.chatId, chatId), eq(messages.role, 'assistant'), eq(messages.proactive, true)),
+    )
+    .orderBy(desc(messages.id))
+    .limit(limit)
+    .all();
+  return rows.reverse();
+}
+
 /** Epoch ms of the latest non-deleted message from *either side*, or null if the chat is empty. */
 export function getLastMessageAt(chatId: number): number | null {
   const row = db
