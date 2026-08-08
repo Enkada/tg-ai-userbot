@@ -119,6 +119,8 @@ export const config = {
     appearancePromptPath: 'prompts/system/appearance.txt',
     /** App-owned technical layer (current app limits + dynamic context). Evolves with features; never user-copied. */
     technicalPromptPath: 'prompts/system/technical.txt',
+    /** The user's usual weekly schedule, feeding the cue-side "where is he right now" line (see src/schedule.ts). */
+    schedulePromptPath: 'prompts/system/schedule.txt',
     /** App-owned tool-protocol scaffold; its {{tools}} tag is filled with the available-tools list. */
     toolsPromptPath: 'prompts/tools/tools.txt',
     // ---- Shared generation params (apply to whichever provider is active) ----

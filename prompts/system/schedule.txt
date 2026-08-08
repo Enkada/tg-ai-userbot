@@ -1,0 +1,39 @@
+# The user's usual week — where he is and what he's doing, by time of day.
+# One block of this at a time reaches the model, rendered into the reply cue and the
+# proactive reach-out cues as: "Going by his usual routine, <name> is probably <text>
+# right now (until ~<end>)." — so she doesn't have to guess his day. What he actually
+# says in the chat always beats this; it's a prior, not a fact.
+#
+# Syntax (parsed by src/schedule.ts, malformed lines fail the boot):
+#
+#   [Mon-Fri]                 weekday section: names (Mon or Monday), ranges (Mon-Fri)
+#                             or lists (Mon,Wed,Fri). Later sections win on overlap.
+#   [2026-08-20..2026-08-27]  date-override section (single date or inclusive range),
+#                             e.g. a vacation — beats any weekday section on those days.
+#   07:00 text                a block: starts at 07:00, runs until the next block's
+#                             start (a day's last block runs into the next day's first).
+#   # comment                 comment lines and blank lines are ignored.
+#
+# Write each block as "where he is / what he's doing", lowercase, so it reads inside
+# the sentence above. Put uncertainty in the text itself: "probably at home",
+# "usually asleep". Delete every block to switch the feature off.
+
+[Mon-Fri]
+00:00 asleep at home
+07:00 just up, going through his morning routine at home
+08:00 commuting to the office
+09:00 at the office, working
+13:00 on his lunch break at work
+14:00 at the office, working
+18:00 commuting home from work
+19:00 at home, free for the evening
+23:00 at home, winding down for bed
+
+[Sat]
+00:00 asleep at home
+09:00 at home, taking the weekend easy
+
+[Sun]
+00:00 asleep at home
+09:00 at home, taking the weekend easy
+23:00 at home, winding down for bed

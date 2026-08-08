@@ -21,6 +21,12 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
   occasional near-instant "had the phone in hand" read), and a short silent beat separates
   the read receipt from the typing indicator (for photos, the vision pass runs inside that
   beat). Commands and unsupported message types are still read instantly.
+- **Schedule awareness**: `prompts/system/schedule.txt` describes the user's usual week
+  (weekday sections + `HH:MM` blocks, with date-override sections for vacations); the reply
+  cue and proactive openers carry a one-line "he's probably at the office, working (until
+  ~18:00)" prior so the model stops guessing his day. A companion time-gap heads-up marks
+  how long ago the conversation above went quiet, so hours-old messages stop reading as
+  just-said. Both tested against prod replays (see `scripts/schedule-cue-test.ts`).
 - **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/persona`, `/name`, `/dump`.
 - **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
   and command output lives in a single reusable **panel** message that each command edits

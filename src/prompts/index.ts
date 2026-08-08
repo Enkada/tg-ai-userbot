@@ -186,6 +186,65 @@ export function replyFormatCue(userName: string, now: Date, period: string): str
 }
 
 /**
+ * The schedule-awareness sentence: what the user is usually doing right now, per
+ * prompts/system/schedule.txt (resolved by schedule.ts; `slot` arrives as arguments to keep
+ * this module import-clean). Spliced after the clock in {@link replyFormatCue} and into the
+ * morning/lull reach-out cues — the same wording tested well in both positions.
+ *
+ * Tested 2026-08-08 (172 replay generations + 40 openers on prod snapshots, scripts/
+ * schedule-cue-test.ts). What the wording carries and, more importantly, what it does NOT:
+ *
+ * - **"probably" + "usual routine", no override clause.** "…but anything he says in the chat
+ *   overrides this" was tested and is *actively harmful*: with a stale "working lol" message
+ *   4h up-window it licensed the chat context to beat the schedule — 0/11 correct on an
+ *   evening "guess what im up to" probe vs 2/3 for this hedged wording. The chat wins over
+ *   the schedule *naturally* (on-vacation contradiction: clean in all 12 samples with no
+ *   clause at all), so the clause solves nothing and costs accuracy.
+ * - **No "background only / don't bring it up" clause either.** It produced the single worst
+ *   reply of the test — a fourth-wall meta-comment on the cue itself ("a whole routine
+ *   summary… schedule app with tits") — while uninvited-leak rates were already ~0 without
+ *   it (1 leak in 30 replies, and that was the un-hedged wording).
+ * - **`(until ~HH:MM)` stays**: it's what answers "when are you home" and it fed correct
+ *   "lunch break coming up" color without recitation.
+ *
+ * In reach-out cues (paired 20-opener test): morning greets stopped guessing "still in bed"
+ * at 9:35 (0/4 schedule-aware → 3/4), lull openers gained natural lunch/office texture, and
+ * evening openers past-tensed the day's work talk instead of continuing it as current. No
+ * schedule recitation and no fixation in any opener.
+ * Used by generate.ts:withReplyCue and proactive.ts:buildReachoutCue.
+ */
+export function scheduleClause(userName: string, slot: { text: string; until: string | null }): string {
+  const until = slot.until ? ` (until ~${slot.until})` : '';
+  return ` Going by his usual routine, ${userName} is probably ${slot.text} right now${until}.`;
+}
+
+/**
+ * The time-gap heads-up: rendered before {@link scheduleClause} when the conversation above
+ * the current turn went quiet a while ago. The window carries no timestamps, so a "working
+ * lol" from 16:04 reads as *just said* at 20:30 and beats every schedule wording — 8/12
+ * replies asserted "you're actually working" at 20:30 without this line. With it, the same
+ * probe went ~4/5 correct, and stale context got correctly re-dated ("after *yesterday's*
+ * productivity glow-up") instead of continued in present tense (2026-08-08).
+ *
+ * The nag concern — "you ignored me for N hours" — was tested explicitly on 5 real
+ * return-after-silence turns (60 replies): zero hour-counting, zero reproach in every gap
+ * arm; the only "waiting for you" flavor appeared equally in the no-gap control (it's her
+ * baseline answer to "how are you", not cue-induced). A "don't remark on the pause" suffix
+ * was tested too and changed nothing, so it's left out (unneeded prohibitions have backfired
+ * before — see the fourth-wall note on {@link scheduleClause}).
+ *
+ * Fires from 45 minutes (below that the conversation is simply live); hours round to the
+ * nearest whole ("about an hour" under ~1.75h), days from 36h. Returns '' under the threshold.
+ * Used by generate.ts:withReplyCue.
+ */
+export function gapHeadsUpClause(userName: string, gapMs: number): string {
+  const h = gapMs / 3_600_000;
+  if (h < 0.75) return '';
+  const label = h >= 36 ? `about ${Math.round(h / 24)} days` : h >= 1.75 ? `about ${Math.round(h)} hours` : 'about an hour';
+  return ` Heads up: ${userName}'s previous messages above are from ${label} ago, not just now.`;
+}
+
+/**
  * Extra sentence spliced inside replyFormatCue's closing bracket while the selfie tool is
  * offered. Once a photo turn enters the window, the model starts imitating the record block
  * instead of calling the tool (measured 3/8 on the prod transcript that surfaced it). A rule
@@ -346,21 +405,28 @@ export const OPENER_SHAPES: readonly { weight: number; shape: (userName: string)
 ];
 
 /**
- * Morning reach-out. `recentOpeners` is {@link recentOpenersClause}'s output ('' when empty).
+ * Morning reach-out. `recentOpeners` is {@link recentOpenersClause}'s output ('' when empty);
+ * `sched` is {@link scheduleClause}'s ('' when the schedule has nothing for now). The schedule
+ * rides right after the greeting instruction — in the paired test that position took "you
+ * awake yet or still fighting the urge to hit snooze?" texts sent to a man already at his
+ * desk (control) to office-aware greetings in 3/4 openers, with no recitation (2026-08-08).
  * Used by proactive.ts:buildReachoutCue.
  */
-export function morningReachoutCue(userName: string, recentOpeners = ''): string {
-  return `[System note: it's morning and ${userName} hasn't messaged yet — you're reaching out first. Greet them warmly and gently start the day. Keep it short and natural, like a real text.${recentOpeners}]`;
+export function morningReachoutCue(userName: string, recentOpeners = '', sched = ''): string {
+  return `[System note: it's morning and ${userName} hasn't messaged yet — you're reaching out first. Greet them warmly and gently start the day.${sched} Keep it short and natural, like a real text.${recentOpeners}]`;
 }
 
 /**
  * First reach-out since they last replied — just starts a thread, the way someone fires off a
  * random text in a lull. Deliberately time-agnostic and substrate-neutral: no mention of them
- * being away, so it never asserts anything the persona is meant to own.
+ * being away, so it never asserts anything the persona is meant to own. `sched` (see
+ * {@link scheduleClause}) follows the rolled shape: it lent openers natural lunch/office
+ * texture and made evening openers past-tense the day's work talk instead of continuing it
+ * as current (paired 20-opener test, 2026-08-08).
  * Used by proactive.ts:buildReachoutCue.
  */
-export function lullReachoutCue(userName: string, shape: string, recentOpeners = ''): string {
-  return `[System note: there's a natural lull — you're messaging ${userName} first, on your own initiative. ${shape} Don't comment on them being quiet or slow to reply — just start, like a normal text. Keep it short.${recentOpeners}]`;
+export function lullReachoutCue(userName: string, shape: string, recentOpeners = '', sched = ''): string {
+  return `[System note: there's a natural lull — you're messaging ${userName} first, on your own initiative. ${shape}${sched} Don't comment on them being quiet or slow to reply — just start, like a normal text. Keep it short.${recentOpeners}]`;
 }
 
 /**

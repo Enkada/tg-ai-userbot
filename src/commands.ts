@@ -14,6 +14,7 @@ import {
 import { findPromptPart, renderSystemPrompt, SYSTEM_PROMPT_PARTS } from './prompts/render.js';
 import {
   addFact,
+  conversationGapMs,
   deleteFact,
   deleteLastMessages,
   editFact,
@@ -501,7 +502,10 @@ register({
     // Each reroll carries a different rolled stance, so a spree explores instead of re-sampling
     // one attractor (see prompts/index.ts:rerollAngleCue). The angle is ephemeral like every
     // other cue — nothing about it is stored, including on the revision row.
-    const rerollHistory = withReplyCue(history, userName, { angle: nextRerollAngle(last.id) });
+    const rerollHistory = withReplyCue(history, userName, {
+      angle: nextRerollAngle(last.id),
+      gapMs: conversationGapMs(chatId),
+    });
 
     const systemPrompt = renderSystemPrompt({ userName, chatId });
     const oldIds = last.tgMessageIds;

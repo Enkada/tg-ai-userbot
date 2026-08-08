@@ -19,9 +19,10 @@
 import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { chat, type ChatMessage, type ChatResult } from './llm.js';
-import { getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
-import { SELFIE_FORMAT_CUE, replyFormatCue, rerollAngleCue } from './prompts/index.js';
+import { conversationGapMs, getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
+import { SELFIE_FORMAT_CUE, gapHeadsUpClause, replyFormatCue, rerollAngleCue, scheduleClause } from './prompts/index.js';
 import { dayPeriod } from './prompts/render.js';
+import { scheduleNow } from './schedule.js';
 import { isSearchConfigured, webSearch } from './search.js';
 import { isSelfieAvailable } from './selfie.js';
 import { parseToolCall } from './tools.js';
@@ -100,15 +101,20 @@ export async function generateReply(
 export function withReplyCue(
   history: ChatMessage[],
   userName: string,
-  opts: { now?: Date; angle?: string } = {},
+  opts: { now?: Date; angle?: string; gapMs?: number | null } = {},
 ): ChatMessage[] {
   const last = history[history.length - 1];
   if (!last || last.role !== 'user') return history;
   const now = opts.now ?? new Date();
   // Order inside the bracket is load-bearing (see replyFormatCue): length rule → anti-echo →
-  // clock → reroll angle → selfie sentence, which stays last. Each part is spliced before the
-  // closing `]` in turn.
+  // clock → gap heads-up → schedule → reroll angle → selfie sentence, which stays last. Each
+  // part is spliced before the closing `]` in turn. Gap and schedule sit with the clock —
+  // they're the rest of the "when/where are we" picture, and that adjacency is the order the
+  // wordings were tested in (see prompts/index.ts:scheduleClause).
   let cue = replyFormatCue(userName, now, dayPeriod(now.getHours()));
+  if (opts.gapMs != null) cue = `${cue.slice(0, -1)}${gapHeadsUpClause(userName, opts.gapMs)}]`;
+  const slot = scheduleNow(now);
+  if (slot) cue = `${cue.slice(0, -1)}${scheduleClause(userName, slot)}]`;
   if (opts.angle) cue = `${cue.slice(0, -1)}${rerollAngleCue(userName, opts.angle)}]`;
   // The selfie sentence joins the cue only while the tool is actually offered — otherwise
   // it would instruct the model to call a tool that isn't in its list.
@@ -128,7 +134,7 @@ export function persistedSearchStrategy(
   userName: string,
 ): ToolLoopStrategy {
   return {
-    buildHistory: () => withReplyCue(getWindow(chatId), userName),
+    buildHistory: () => withReplyCue(getWindow(chatId), userName, { gapMs: conversationGapMs(chatId) }),
     recordSearch: (idx, query, summary) => saveSearch(userRowId, idx, query, summary),
   };
 }

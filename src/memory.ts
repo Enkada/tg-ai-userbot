@@ -175,6 +175,32 @@ export function getLastMessageMeta(chatId: number): LastMessageMeta | null {
   return row ?? null;
 }
 
+/**
+ * How long ago the conversation *above the current exchange* went quiet, for the tail cue's
+ * time-gap heads-up (see prompts/index.ts:gapHeadsUpClause). The window carries no timestamps,
+ * so without this a message from hours ago reads as just-said and drags replies into its
+ * stale present tense.
+ *
+ * "Current exchange" = the trailing run of rows younger than 10 minutes (the message being
+ * answered, a burst of them, or a reply being rerolled moments after it was sent). The gap is
+ * measured to the newest row *older* than that. Null when the whole window is fresh or the
+ * chat is empty — callers render no clause then.
+ */
+export function conversationGapMs(chatId: number, now = Date.now()): number | null {
+  const FRESH_MS = 10 * 60_000;
+  const rows = db
+    .select({ at: messages.createdAt })
+    .from(messages)
+    .where(and(eq(messages.chatId, chatId), eq(messages.deleted, false)))
+    .orderBy(desc(messages.id))
+    .limit(50)
+    .all();
+  for (const row of rows) {
+    if (now - row.at >= FRESH_MS) return now - row.at;
+  }
+  return null;
+}
+
 /** Epoch ms of the latest non-deleted *user* message in a chat, or null if there is none. */
 export function getLastUserMessageAt(chatId: number): number | null {
   const row = db

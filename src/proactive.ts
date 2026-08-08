@@ -33,7 +33,9 @@ import {
   lullReachoutCue,
   morningReachoutCue,
   recentOpenersClause,
+  scheduleClause,
 } from './prompts/index.js';
+import { scheduleNow } from './schedule.js';
 import { renderSystemPrompt } from './prompts/render.js';
 import { activeProviderId, type ChatResult } from './llm.js';
 import { ephemeralSearchStrategy, generateReply } from './generate.js';
@@ -105,11 +107,17 @@ function buildReachoutCue(chatId: number, framing: Framing, attempt: number, use
   // The openers she has already sent, soft-deleted ones included, so she can avoid repeating
   // herself — the window alone can't tell her, because a deleted opener leaves it entirely.
   const openers = recentOpenersClause(getRecentOpeners(chatId, config.proactive.recentOpenersShown));
-  if (framing === 'morning') return morningReachoutCue(userName, openers);
+  // What his routine says he's doing right now — morning greets stop guessing "still in bed"
+  // at a desk hour, lull openers gain lunch/office texture (see prompts/index.ts:scheduleClause).
+  const slot = scheduleNow();
+  const sched = slot ? scheduleClause(userName, slot) : '';
+  if (framing === 'morning') return morningReachoutCue(userName, openers, sched);
   // First opener since they last replied just starts a thread; from the 2nd unanswered one on,
-  // she may notice she's been left on read. Both texts live in prompts/index.ts.
+  // she may notice she's been left on read. Both texts live in prompts/index.ts. The ignored
+  // cue deliberately does NOT carry the schedule yet: that pairing (noticing being left on
+  // read + knowing he's at work) is untested, and this codebase doesn't ship untested cue text.
   return attempt <= 1
-    ? lullReachoutCue(userName, rollOpenerShape(userName), openers)
+    ? lullReachoutCue(userName, rollOpenerShape(userName), openers, sched)
     : ignoredReachoutCue(userName, openers);
 }
 
