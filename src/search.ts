@@ -5,11 +5,19 @@
  * response into a compact, model-readable summary that gets stored against the user's
  * message and injected into the context window (see {@link saveSearch}).
  */
+import { fetch } from 'undici';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
+import { getProxyDispatcher } from './proxyAgent.js';
 
 const log = createLogger('search');
 const cfg = config.tavily;
+/**
+ * Optional proxy for Tavily's calls (see {@link getProxyDispatcher}); undefined ⇒ direct.
+ * Required from the prod VDS: Tavily's load balancer 403s every key-bearing request from
+ * that IP, so a direct call fails on *any* query, benign or not.
+ */
+const dispatcher = getProxyDispatcher();
 
 /** Whether search is usable at all (an API key is configured). */
 export function isSearchConfigured(): boolean {
@@ -51,6 +59,7 @@ export async function webSearch(query: string): Promise<string> {
       authorization: `Bearer ${cfg.apiKey}`,
     },
     signal: AbortSignal.timeout(cfg.timeoutMs),
+    dispatcher,
     body: JSON.stringify({
       query,
       search_depth: cfg.searchDepth,
@@ -106,6 +115,7 @@ export async function getSearchUsage(): Promise<SearchUsage | null> {
     const res = await fetch(`${cfg.baseUrl}/usage`, {
       headers: { authorization: `Bearer ${cfg.apiKey}` },
       signal: AbortSignal.timeout(5000),
+      dispatcher,
     });
     if (!res.ok) {
       usageCache = { at: Date.now(), usage: null };

@@ -8,7 +8,7 @@
 import { encode } from 'gpt-tokenizer';
 import { fetch } from 'undici';
 import { config } from '../config.js';
-import { getOpenRouterDispatcher } from './proxyAgent.js';
+import { getProxyDispatcher } from '../proxyAgent.js';
 import {
   type LlmProvider,
   type ProviderStatus,
@@ -20,8 +20,8 @@ import {
 const cfg = config.llm.openrouter;
 const gen = config.llm;
 const CHAT_URL = `${cfg.baseUrl}/chat/completions`;
-/** Optional proxy for OpenRouter's calls (see {@link getOpenRouterDispatcher}); undefined ⇒ direct. */
-const dispatcher = getOpenRouterDispatcher();
+/** Optional proxy for OpenRouter's calls (see {@link getProxyDispatcher}); undefined ⇒ direct. */
+const dispatcher = getProxyDispatcher();
 
 /**
  * Upstream provider routing (the `provider` request field). `order` lists preferred
