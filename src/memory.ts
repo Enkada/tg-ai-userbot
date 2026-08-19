@@ -12,7 +12,16 @@ import {
   summaries,
   summaryState,
 } from './db/schema.js';
-import type { FactCategory, FactRow, FactsStateRow, PhotoGenRow, ProactiveStateRow, SummaryStateRow } from './db/schema.js';
+import { isReachoutKind } from './db/schema.js';
+import type {
+  FactCategory,
+  FactRow,
+  FactsStateRow,
+  MessageKind,
+  PhotoGenRow,
+  ProactiveStateRow,
+  SummaryStateRow,
+} from './db/schema.js';
 import type { ChatMessage } from './llm.js';
 import type { ProviderId } from './providers/types.js';
 import { PHOTO_SENT_ACK, photoRecord, photoRecordNumbered, searchRecord } from './prompts/index.js';
@@ -60,9 +69,10 @@ export interface GenerationSource {
  * Appends a message to the conversation memory. `tgMessageIds` are the Telegram id(s) of the
  * sent message(s) — one for a user message or a single-bubble reply, several when streaming
  * splits a reply into bubbles (stored so they can be revoked/replaced later). `source` records
- * which provider/model generated an assistant reply (omit for user messages). `proactive` marks
- * an assistant reply the bot sent unprompted (the initiating message). Returns the new row's id,
- * so image captions can be linked to it via {@link saveAttachment}.
+ * which provider/model generated an assistant reply (omit for user messages). `kind` records
+ * which generation path produced the row (see {@link MESSAGE_KINDS}) — the legacy `proactive`
+ * flag is derived from it here, so the two can never disagree. Returns the new row's id, so
+ * image captions can be linked to it via {@link saveAttachment}.
  */
 export function saveMessage(
   chatId: number,
@@ -70,7 +80,7 @@ export function saveMessage(
   content: string,
   tgMessageIds?: number[],
   source?: GenerationSource,
-  proactive = false,
+  kind: MessageKind = 'reply',
 ): number {
   const row = db
     .insert(messages)
@@ -83,7 +93,8 @@ export function saveMessage(
       tgMessageIds,
       provider: source?.provider,
       model: source?.model,
-      proactive,
+      kind,
+      proactive: isReachoutKind(kind),
     })
     .returning({ id: messages.id })
     .get();
@@ -120,12 +131,29 @@ export interface LastAssistant {
    * tracking. A single-bubble reply has one id; a streamed reply has one per bubble.
    */
   tgMessageIds: number[] | null;
+  /** Which generation path produced the reply — what `/reroll` rebuilds its context from. */
+  kind: MessageKind;
+  /**
+   * The legacy bot-initiated flag. Only interesting when it disagrees with `kind`: a row
+   * written before the `kind` column existed reads `reply` + `proactive: true`, which is a
+   * reach-out whose framing was never recorded (see proactive.ts:reachoutKindOf).
+   */
+  proactive: boolean;
+  /** Epoch ms the row was stored, which dates the legacy framing guess in `reachoutKindOf`. */
+  createdAt: number;
 }
 
 /** Returns the latest non-deleted assistant message for a chat, or null. */
 export function getLastAssistant(chatId: number): LastAssistant | null {
   const row = db
-    .select({ id: messages.id, content: messages.content, tgMessageIds: messages.tgMessageIds })
+    .select({
+      id: messages.id,
+      content: messages.content,
+      tgMessageIds: messages.tgMessageIds,
+      kind: messages.kind,
+      proactive: messages.proactive,
+      createdAt: messages.createdAt,
+    })
     .from(messages)
     .where(
       and(eq(messages.chatId, chatId), eq(messages.role, 'assistant'), eq(messages.deleted, false)),
@@ -450,10 +478,18 @@ export function withSearches(content: string, results: SearchEntry[]): string {
 
 /** A window message enriched with provenance, for rich renderings (`/dump`). */
 export interface WindowMessage extends ChatMessage {
+  /**
+   * The `messages.id` this turn came from. One row can render as several turns (a selfie row
+   * expands into call → ack → caption), so this is not unique across the array — which is
+   * exactly what {@link getWindowExcluding} needs it for.
+   */
+  id: number;
   /** Epoch ms the row was stored (refreshed when `/reroll` or `/update` re-sends the bubbles). */
   at: number;
   /** Serving model recorded for an assistant reply, or null (user turns, unknown, human-edited). */
   model: string | null;
+  /** Which generation path produced the row (see {@link MESSAGE_KINDS}). */
+  kind: MessageKind;
   /** True for an assistant reply the bot sent unprompted. */
   proactive: boolean;
 }
@@ -473,6 +509,7 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
       content: messages.content,
       createdAt: messages.createdAt,
       model: messages.model,
+      kind: messages.kind,
       proactive: messages.proactive,
     })
     .from(messages)
@@ -514,8 +551,8 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
   }
 
   const userName = chatUserName(chatId);
-  return rows.flatMap(({ id, role, content, createdAt, model, proactive }) => {
-    const meta = { at: createdAt, model: model ?? null, proactive };
+  return rows.flatMap(({ id, role, content, createdAt, model, kind, proactive }) => {
+    const meta = { id, at: createdAt, model: model ?? null, kind, proactive };
     const captions = captionsByMessage.get(id) ?? [];
     const searchList = searchesByMessage.get(id) ?? [];
     if (role === 'assistant') {
@@ -545,6 +582,21 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
 /** Returns the current context window (oldest → newest) for a chat, as the LLM receives it. */
 export function getWindow(chatId: number): ChatMessage[] {
   return getWindowDetailed(chatId).map(({ role, content }) => ({ role, content }));
+}
+
+/**
+ * The context window with every turn belonging to one message row removed — the window as it
+ * looked *before* that row was written.
+ *
+ * `/reroll` regenerates against this: the reply being replaced must not sit in its own
+ * generation context. It filters by row id rather than popping trailing assistant turns,
+ * because a run of consecutive assistant rows (an unanswered reach-out followed by another)
+ * is real history that the reroll of the last one must keep.
+ */
+export function getWindowExcluding(chatId: number, excludeId: number): ChatMessage[] {
+  return getWindowDetailed(chatId)
+    .filter((m) => m.id !== excludeId)
+    .map(({ role, content }) => ({ role, content }));
 }
 
 export interface WindowInfo {

@@ -38,8 +38,8 @@ import {
   MIN_WINDOW,
   STEP,
 } from './memory.js';
-import { FACT_CATEGORIES, type FactCategory } from './db/schema.js';
-import { withReplyCue } from './generate.js';
+import { FACT_CATEGORIES, type FactCategory, type MessageKind } from './db/schema.js';
+import { ephemeralSearchStrategy, generateReply, withReplyCue } from './generate.js';
 import { REROLL_ANGLES } from './prompts/index.js';
 import { forgetDebris, trackDebris } from './panel.js';
 import {
@@ -60,8 +60,19 @@ import { finalizeReply, parseToolCall, stripToolCalls } from './tools.js';
 import { ReplyStreamer } from './send.js';
 import { splitMessage } from './chunker.js';
 import { stopInFlight } from './inflight.js';
-import { getProactiveStatus, runContinue, runProactiveNow } from './proactive.js';
+import { buildReachoutCue, getProactiveStatus, reachoutKindOf, runContinue, runProactiveNow } from './proactive.js';
 import { getDiaryStatus, listCandidateChannels, runDiaryNow } from './diary.js';
+
+/**
+ * How each bot-initiated {@link MessageKind} reads in a `/dump`. Ordinary replies get no
+ * marker; a row from before the `kind` column falls back to the bare `proactive` flag, which
+ * is all it has.
+ */
+const KIND_LABELS: Partial<Record<MessageKind, string>> = {
+  reachout_morning: '🛎️ morning greeting',
+  reachout_lull: '🛎️ reach-out',
+  reachout_ignored: '🛎️ reach-out (unanswered)',
+};
 
 /** Display labels for chat roles, used by /prompt. */
 const ROLE_LABELS: Record<'system' | 'user' | 'assistant', string> = {
@@ -494,20 +505,14 @@ register({
       return;
     }
 
-    // Regenerate against the context up to (but excluding) the reply we're replacing,
-    // so the model answers the last user message afresh — with the same format cue a
-    // first-pass reply gets, so a reroll can't come back as a wall of text.
-    const history = getWindow(chatId);
-    while (history.length && history[history.length - 1].role === 'assistant') history.pop();
-    // Each reroll carries a different rolled stance, so a spree explores instead of re-sampling
-    // one attractor (see prompts/index.ts:rerollAngleCue). The angle is ephemeral like every
-    // other cue — nothing about it is stored, including on the revision row.
-    const rerollHistory = withReplyCue(history, userName, {
-      angle: nextRerollAngle(last.id),
-      gapMs: conversationGapMs(chatId),
-    });
+    // A reach-out was never an answer to anything: it was generated against an ephemeral
+    // director cue, with the long-term-memory block deliberately dropped and the recent-openers
+    // list telling her what not to repeat. Regenerating it as a reply would answer whatever the
+    // user last said — possibly hours ago — so the cue is rebuilt from the row's stored kind
+    // instead. Null for an ordinary reply, which takes the reactive path below unchanged.
+    const reachout = reachoutKindOf(chatId, last);
 
-    const systemPrompt = renderSystemPrompt({ userName, chatId });
+    const systemPrompt = renderSystemPrompt({ userName, chatId }, { includeMemory: !reachout });
     const oldIds = last.tgMessageIds;
     // A streamed reply can't be edited in place (the new reply may split into a different
     // number of bubbles), so we replace by deletion. The swap happens the instant the first
@@ -523,8 +528,35 @@ register({
     });
     let regenerated: ChatResult;
     try {
-      // Reroll is a single pass — one beginPass.
       regenerated = await withTyping(client, msg.chat, () => {
+        if (reachout) {
+          // Same machinery the scheduler uses, so the reroll gets the full opener context back:
+          // a freshly built cue (new schedule slot, new lull shape, and an openers list that now
+          // includes the text being replaced — its row isn't rewritten until the new one lands)
+          // and a working search loop. The window excludes the opener itself; consecutive
+          // earlier openers stay, since they are real history.
+          return generateReply(
+            systemPrompt,
+            ephemeralSearchStrategy(chatId, buildReachoutCue(chatId, reachout, userName), {
+              excludeId: last.id,
+            }),
+            `Reroll [${reachout}] chat ${chatId}`,
+            streamer,
+          );
+        }
+        // Regenerate against the context up to (but excluding) the reply we're replacing, so the
+        // model answers the last user message afresh — with the same format cue a first-pass
+        // reply gets, so a reroll can't come back as a wall of text. Each reroll carries a
+        // different rolled stance, so a spree explores instead of re-sampling one attractor (see
+        // prompts/index.ts:rerollAngleCue). The angle is ephemeral like every other cue —
+        // nothing about it is stored, including on the revision row.
+        const history = getWindow(chatId);
+        while (history.length && history[history.length - 1].role === 'assistant') history.pop();
+        const rerollHistory = withReplyCue(history, userName, {
+          angle: nextRerollAngle(last.id),
+          gapMs: conversationGapMs(chatId),
+        });
+        // The reactive reroll is a single pass — one beginPass, and no search loop.
         streamer.beginPass();
         return chat(systemPrompt, rerollHistory, streamer.onToken);
       });
@@ -539,8 +571,9 @@ register({
     }
 
     // A send_selfie call IS executed on reroll — a rerolled "no-tool" text reply can come
-    // back as ack + call → photo. Only web_search stays stripped here (reroll doesn't run
-    // the search loop; the stored search blocks still ground the reply).
+    // back as ack + call → photo. A leftover web_search call is only stripped: the reach-out
+    // branch already ran the loop above, and the reactive branch deliberately doesn't run one
+    // (the searches stored against the user's turn still ground the reply).
     const call = parseToolCall(regenerated.content);
     const selfieProse =
       isSelfieAvailable() && call?.name === 'send_selfie'
@@ -1256,7 +1289,7 @@ register({
             const meta = [
               formatDateTime(m.at),
               m.model ? `\`${m.model}\`` : null,
-              m.proactive ? '🛎️ proactive' : null,
+              KIND_LABELS[m.kind] ?? (m.proactive ? '🛎️ proactive' : null),
             ]
               .filter(Boolean)
               .join(' · ');

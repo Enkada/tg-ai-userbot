@@ -45,7 +45,7 @@ A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev
 | `/openrouter` (`/or`) | OpenRouter config, model context/vision, and free-tier usage/limits (`/key`) |
 | `/nuke`           | Erase the whole Telegram chat for both sides (revoke) **and** wipe memory + summaries; asks for `/nuke confirm` above 20 stored messages |
 | `/delete` (`/d`)  | Delete the last N messages for both sides — `/d` = 1, `/d N` = N; soft-flags memory like `/nuke` |
-| `/reroll` (`/r`)  | Regenerate the last reply (re-runs the model without it) and edits the message in place |
+| `/reroll` (`/r`)  | Regenerate the last reply (re-runs the model without it) and edits the message in place. Context-aware: a proactive reach-out is regenerated as a reach-out — same director cue, same withheld memory block, a freshly rolled opener shape — not as an answer to whatever was last said |
 | `/update` (`/u`)  | Replace the last reply with your own text — `/u <new text>`; edits the message in place |
 | `/context` (`/c`) | Token usage (system prompt + window) vs. the model's max context, plus window re-anchoring state |
 | `/prompt` (`/p`)  | Show the prompt the LLM receives — system prompt + the first 3 and last 3 messages — as a code block |

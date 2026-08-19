@@ -2,6 +2,32 @@ import { sql } from 'drizzle-orm';
 import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 /**
+ * How an assistant row came to be — the generation path, not the content.
+ *
+ * Every kind but `reply` is produced against an *ephemeral director cue* rather than against
+ * the user's last message, and each cue carries its own rules (which prompt layers are in
+ * play, what the model is told to do, what it must not repeat). None of that is recoverable
+ * from the stored text, so it is recorded here; `/reroll` reads it to rebuild the same
+ * context instead of regenerating a reach-out as a reply to an hours-old user message.
+ *
+ *  - `reply`             — a reactive reply, and every user row. The default.
+ *  - `reachout_morning`  — the good-morning greeting (proactive.ts).
+ *  - `reachout_lull`     — the first daytime opener since the user last replied.
+ *  - `reachout_ignored`  — a daytime opener after a prior one went unanswered.
+ *
+ * The other cue-driven paths (`/continue`, the selfie ack/caption/failure lines) are still
+ * stored as `reply` — their rerolls are unfixed, and they join this list when they are.
+ */
+export const MESSAGE_KINDS = ['reply', 'reachout_morning', 'reachout_lull', 'reachout_ignored'] as const;
+
+export type MessageKind = (typeof MESSAGE_KINDS)[number];
+
+/** The three bot-initiated kinds — the ones {@link messages.proactive} flags. */
+export function isReachoutKind(kind: MessageKind): boolean {
+  return kind.startsWith('reachout_');
+}
+
+/**
  * Conversation memory. Every user message and AI reply is stored as one row.
  * Deletion is soft (the `deleted` flag) — `/nuke` and `/delete` flag rows instead of
  * removing them.
@@ -35,9 +61,24 @@ export const messages = sqliteTable(
      */
     model: text('model'),
     /**
+     * Which generation path produced this row — see {@link MESSAGE_KINDS}. The point is
+     * `/reroll`: a reach-out was generated against a director cue, not against the user's
+     * last message, so regenerating it as a reactive reply loses everything that made it
+     * what it was. The kind is what lets the reroll rebuild the original context.
+     *
+     * User rows and ordinary reactive replies are `reply` (the default), which is also what
+     * every row written before this column existed carries — see {@link isReachoutKind} for
+     * how a legacy proactive row is still recognised.
+     */
+    kind: text('kind', { enum: MESSAGE_KINDS }).notNull().default('reply'),
+    /**
      * True when this assistant reply was sent unprompted by the proactive scheduler
      * (the bot initiating). NULL/false for user rows and ordinary reactive replies.
-     * Drives the "one outstanding proactive message" guard.
+     *
+     * A denormalization of {@link kind} — {@link saveMessage} derives it, so the two can
+     * never disagree. It stays because rows written before `kind` existed have only this
+     * flag, and the recent-openers query (which deliberately reads soft-deleted rows) must
+     * keep seeing them.
      */
     proactive: integer('proactive', { mode: 'boolean' }).notNull().default(false),
     /** Soft-delete flag. Set by /nuke and /delete; excluded from the context window. */

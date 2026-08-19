@@ -19,7 +19,14 @@
 import { config } from './config.js';
 import { createLogger } from './logger.js';
 import { chat, type ChatMessage, type ChatResult } from './llm.js';
-import { conversationGapMs, getWindow, saveSearch, withSearches, type SearchEntry } from './memory.js';
+import {
+  conversationGapMs,
+  getWindow,
+  getWindowExcluding,
+  saveSearch,
+  withSearches,
+  type SearchEntry,
+} from './memory.js';
 import { SELFIE_FORMAT_CUE, gapHeadsUpClause, replyFormatCue, rerollAngleCue, scheduleClause } from './prompts/index.js';
 import { dayPeriod } from './prompts/render.js';
 import { scheduleNow } from './schedule.js';
@@ -144,14 +151,21 @@ export function persistedSearchStrategy(
  * for the next call only. Nothing is persisted — the cue must not leak into stored context
  * (it would corrupt the user-activity timer and plant a phantom user turn), so neither may a
  * search hung off it. The final opener text the caller sends is what gets remembered.
+ *
+ * `opts.excludeId` drops one message row from the window: `/reroll` regenerates a reach-out
+ * against the context it originally had, which is the window *without* the opener being
+ * replaced (see {@link getWindowExcluding}).
  */
-export function ephemeralSearchStrategy(chatId: number, cue: string): ToolLoopStrategy {
+export function ephemeralSearchStrategy(
+  chatId: number,
+  cue: string,
+  opts: { excludeId?: number } = {},
+): ToolLoopStrategy {
   const searches: SearchEntry[] = [];
+  const window = () =>
+    opts.excludeId === undefined ? getWindow(chatId) : getWindowExcluding(chatId, opts.excludeId);
   return {
-    buildHistory: () => [
-      ...getWindow(chatId),
-      { role: 'user', content: withSearches(cue, searches) },
-    ],
+    buildHistory: () => [...window(), { role: 'user', content: withSearches(cue, searches) }],
     recordSearch: (_idx, query, summary) => {
       searches.push({ query, summary });
     },

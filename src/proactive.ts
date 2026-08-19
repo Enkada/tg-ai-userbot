@@ -23,6 +23,7 @@
  */
 import type { InputPeerLike, TelegramClient } from '@mtcute/node';
 import { config } from './config.js';
+import type { MessageKind } from './db/schema.js';
 import { createLogger } from './logger.js';
 import { enqueue } from './queue.js';
 import {
@@ -55,7 +56,12 @@ import { withTyping } from './typing.js';
 
 const log = createLogger('proactive');
 
-type Framing = 'morning' | 'daytime';
+/**
+ * The three reach-out flavours, named as the {@link MessageKind}s they are stored under so the
+ * cue that produced a row and the row's recorded kind are literally the same value — which is
+ * what lets `/reroll` rebuild the cue from the DB (see {@link buildReachoutCue}).
+ */
+export type ReachoutKind = Extract<MessageKind, `reachout_${string}`>;
 
 // ---- Scheduling helpers ------------------------------------------------------------------
 
@@ -97,28 +103,63 @@ function hoursSinceLastUser(chatId: number): number {
 
 /**
  * Builds the ephemeral director cue for a reach-out (appended as a user turn to the generation
- * window, never stored). `attempt` is which reach-out this is since the user last replied (1 =
- * first). The first is time-agnostic — it never mentions the silence; from the 2nd unanswered
- * one on, the cue lets her notice she's been left on read, lightly. The exact hour-count and
- * attempt number are deliberately *not* fed in — only the on/off "a prior one went unanswered"
- * — to keep tone from fixating on time (a dedicated time-sense system can do that later).
+ * window, never stored). The `reachout_lull` kind is the first since the user last replied and
+ * is time-agnostic — it never mentions the silence; `reachout_ignored` (a prior one went
+ * unanswered) lets her notice she's been left on read, lightly. The exact hour-count and
+ * attempt number are deliberately *not* fed in — only that on/off distinction — to keep tone
+ * from fixating on time (a dedicated time-sense system can do that later).
+ *
+ * Exported because `/reroll` rebuilds the cue for a stored reach-out row from its recorded
+ * {@link MessageKind}. Everything else it needs — the recent openers, the schedule slot, the
+ * lull shape — is recomputed here at call time rather than stored, which is what makes a
+ * rerolled opener diverge from the one it replaces instead of repeating it.
  */
-function buildReachoutCue(chatId: number, framing: Framing, attempt: number, userName: string): string {
+export function buildReachoutCue(chatId: number, kind: ReachoutKind, userName: string): string {
   // The openers she has already sent, soft-deleted ones included, so she can avoid repeating
   // herself — the window alone can't tell her, because a deleted opener leaves it entirely.
+  // On a `/reroll` this list also contains the opener being replaced (its row is not rewritten
+  // until the new text lands), so the reroll is pushed off the text it is rerolling for free.
   const openers = recentOpenersClause(getRecentOpeners(chatId, config.proactive.recentOpenersShown));
   // What his routine says he's doing right now — morning greets stop guessing "still in bed"
   // at a desk hour, lull openers gain lunch/office texture (see prompts/index.ts:scheduleClause).
   const slot = scheduleNow();
   const sched = slot ? scheduleClause(userName, slot) : '';
-  if (framing === 'morning') return morningReachoutCue(userName, openers, sched);
+  if (kind === 'reachout_morning') return morningReachoutCue(userName, openers, sched);
   // First opener since they last replied just starts a thread; from the 2nd unanswered one on,
   // she may notice she's been left on read. Both texts live in prompts/index.ts. The ignored
   // cue deliberately does NOT carry the schedule yet: that pairing (noticing being left on
   // read + knowing he's at work) is untested, and this codebase doesn't ship untested cue text.
-  return attempt <= 1
+  //
+  // The lull shape is rolled per call, so a reroll of a lull opener draws a fresh one rather
+  // than re-sampling the shape that just got rejected.
+  return kind === 'reachout_lull'
     ? lullReachoutCue(userName, rollOpenerShape(userName), openers, sched)
     : ignoredReachoutCue(userName, openers);
+}
+
+/**
+ * The reach-out kind a stored assistant row should be regenerated as, or null when the row is
+ * an ordinary reply and `/reroll` should take its normal reactive path.
+ *
+ * Normally this is just the row's recorded `kind`. The fallback exists for rows written before
+ * that column did: they carry only the `proactive` boolean, so the framing they were generated
+ * with is genuinely unrecoverable and is re-derived here from the clock and the current ignored
+ * streak — best effort, and only ever reachable for openers already sitting in the chat at
+ * deploy time. Nothing is back-filled into the DB, because a guess written to a column stops
+ * looking like a guess.
+ */
+export function reachoutKindOf(
+  chatId: number,
+  row: { kind: MessageKind; proactive: boolean; createdAt: number },
+): ReachoutKind | null {
+  if (row.kind !== 'reply') return row.kind;
+  if (!row.proactive) return null;
+  // Dated from when the row was sent, not from now: an unanswered evening opener rerolled the
+  // next morning would otherwise come back rebuilt as a good-morning greeting.
+  if (new Date(row.createdAt).getHours() < config.proactive.morningEndHour) return 'reachout_morning';
+  // ignoredCount was bumped to the attempt number when the opener was sent, so 1 is still the
+  // first (time-agnostic) one.
+  return (getProactiveState(chatId)?.ignoredCount ?? 0) <= 1 ? 'reachout_lull' : 'reachout_ignored';
 }
 
 /**
@@ -144,10 +185,10 @@ function rollOpenerShape(userName: string): string {
  * Throws on failure (the caller decides how to recover).
  *
  * `opts.includeMemory` drops the long-term-memory block for cold openers (see {@link sendReachout});
- * `opts.proactive` flags the stored row as bot-initiated (the reach-out guard), left false for the
- * user-triggered {@link runContinue}; `opts.interruptible` registers the generation so `/stop` can
- * abort it (only `/continue` — automated openers are short and their abort would tangle with the
- * reach-out reschedule state machine).
+ * `opts.kind` is the generation path recorded on the stored row, which also derives the legacy
+ * proactive flag ({@link saveMessage}) — `reply` for the user-triggered {@link runContinue};
+ * `opts.interruptible` registers the generation so `/stop` can abort it (only `/continue` —
+ * automated openers are short and their abort would tangle with the reschedule state machine).
  */
 async function sendCued(
   client: TelegramClient,
@@ -155,7 +196,7 @@ async function sendCued(
   cue: string,
   userName: string,
   label: string,
-  opts: { includeMemory: boolean; proactive: boolean; interruptible: boolean },
+  opts: { includeMemory: boolean; kind: MessageKind; interruptible: boolean },
 ): Promise<void> {
   const systemPrompt = renderSystemPrompt({ userName, chatId }, { includeMemory: opts.includeMemory });
   const peer: InputPeerLike = chatId;
@@ -174,7 +215,7 @@ async function sendCued(
       // message" guard, for openers) stays consistent with the chat, then rethrow for the caller.
       const partialText = finalizeReply(streamer.streamedText);
       if (streamer.ids.length > 0 && partialText) {
-        saveMessage(chatId, 'assistant', partialText, streamer.ids, { provider: activeProviderId(), model: null }, opts.proactive);
+        saveMessage(chatId, 'assistant', partialText, streamer.ids, { provider: activeProviderId(), model: null }, opts.kind);
       }
       throw err;
     }
@@ -192,7 +233,7 @@ async function sendCued(
       text = await ackLine(systemPrompt, chatId, userName, selfieProse);
     }
     const sentIds = await streamer.finalize(text);
-    saveMessage(chatId, 'assistant', text, sentIds, { provider: activeProviderId(), model: reply.model }, opts.proactive);
+    saveMessage(chatId, 'assistant', text, sentIds, { provider: activeProviderId(), model: reply.model }, opts.kind);
     log.info(`${label} sent: ${text.slice(0, 80)}`);
     if (selfieProse) {
       await runSelfieFlow({
@@ -238,26 +279,31 @@ export async function runContinue(
   const cue = buildContinueCue(userName, directive);
   await sendCued(client, chatId, cue, userName, `Continue chat ${chatId}`, {
     includeMemory: true,
-    proactive: false,
+    kind: 'reply',
     interruptible: true,
   });
 }
 
-/** Sends a reach-out (morning greeting or daytime opener) as attempt #`attempt`. */
+/**
+ * Sends a reach-out of the given kind. `attempt` is which one this is since the user last
+ * replied — it only labels the log line; the cue itself is chosen by `kind` (see
+ * {@link buildReachoutCue}), and the row is stored under that same kind so `/reroll` can
+ * rebuild this exact context later.
+ */
 async function sendReachout(
   client: TelegramClient,
   chatId: number,
-  framing: Framing,
+  kind: ReachoutKind,
   attempt: number,
   userName: string,
 ): Promise<void> {
-  const cue = buildReachoutCue(chatId, framing, attempt, userName);
+  const cue = buildReachoutCue(chatId, kind, userName);
   // Openers omit the long-term-memory block: with no user message to anchor on, the model fixates
   // on the most salient summary and rehashes it every reach-out (see renderSystemPrompt). The live
   // recent-message window still grounds short-term continuity. Stored proactive (the reach-out guard).
-  await sendCued(client, chatId, cue, userName, `Proactive [${framing} #${attempt}] chat ${chatId}`, {
+  await sendCued(client, chatId, cue, userName, `Proactive [${kind} #${attempt}] chat ${chatId}`, {
     includeMemory: false,
-    proactive: true,
+    kind,
     interruptible: false,
   });
 }
@@ -318,12 +364,17 @@ async function evaluateReachout(client: TelegramClient, chatId: number, now: Dat
   // Armed but not yet due.
   if (Date.now() < state.dueAt) return;
 
-  // Due: send (no gate). This is the (ignored+1)-th reach-out since the user last replied.
-  const framing: Framing = state.isMorning ? 'morning' : 'daytime';
+  // Due: send (no gate). This is the (ignored+1)-th reach-out since the user last replied —
+  // the first just opens a thread, later ones may notice they went unanswered.
+  const kind: ReachoutKind = state.isMorning
+    ? 'reachout_morning'
+    : ignored < 1
+      ? 'reachout_lull'
+      : 'reachout_ignored';
   const userName = state.userName ?? 'there';
   const attempt = ignored + 1;
   try {
-    await sendReachout(client, chatId, framing, attempt, userName);
+    await sendReachout(client, chatId, kind, attempt, userName);
     rescheduleAfterReachout(chatId, attempt);
   } catch (err) {
     // Failed send doesn't count as an ignored message — retry at the same escalation level.
@@ -411,8 +462,9 @@ export async function runProactiveNow(
   if (!config.proactive.enabled) return 'Proactive messaging is off — enable it first.';
 
   try {
-    const attempt = (getProactiveState(chatId)?.ignoredCount ?? 0) + 1;
-    await sendReachout(client, chatId, 'daytime', attempt, userName);
+    const ignored = getProactiveState(chatId)?.ignoredCount ?? 0;
+    const attempt = ignored + 1;
+    await sendReachout(client, chatId, ignored < 1 ? 'reachout_lull' : 'reachout_ignored', attempt, userName);
     return `Reach-out sent (preview of attempt #${attempt} — schedule unchanged).`;
   } catch (err) {
     log.error('Forced proactive send failed:', err);
