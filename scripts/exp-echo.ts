@@ -114,7 +114,7 @@ export function firstEcho(reply: string, userMessage: string): number {
 
 /** Re-scores a finished run's JSONL with the sharper metrics, optionally over a subset of ids. */
 function analyze(name: string, pos: Position[], only?: Set<number>) {
-  const path = resolve(process.cwd(), 'docs/rejections/runs', `${name}.jsonl`);
+  const path = resolve(process.cwd(), '.scratch/rejections/runs', `${name}.jsonl`);
   const all: Sample[] = readFileSync(path, 'utf8')
     .split('\n')
     .filter(Boolean)
@@ -172,7 +172,7 @@ if (stage === 'inspect') {
 if (stage === 'pool') {
   const runs = ['echo-1-flagged', 'echo-2-flagged', 'echo-3-both', 'echo-4-flagged', 'echo-5-both'];
   const all: Sample[] = runs.flatMap((r) =>
-    readFileSync(resolve(process.cwd(), 'docs/rejections/runs', `${r}.jsonl`), 'utf8')
+    readFileSync(resolve(process.cwd(), '.scratch/rejections/runs', `${r}.jsonl`), 'utf8')
       .split('\n')
       .filter(Boolean)
       .map((l) => JSON.parse(l)),

@@ -227,7 +227,7 @@ const exp = {
   positions: positions(USED.map((p) => p.id)),
   arms,
   samples: Number(process.env.N ?? 3),
-  outDir: resolve(process.cwd(), 'docs/rejections/runs'),
+  outDir: resolve(process.cwd(), '.scratch/rejections/runs'),
 };
 
 const samples = await run(exp);
@@ -266,4 +266,4 @@ for (const p of USED) {
 }
 writeFileSync(resolve(exp.outDir, `${exp.name}.md`), lines.join('\n'), 'utf8');
 console.log(lines.slice(0, 14).join('\n'));
-console.log(`\nwrote docs/rejections/runs/${exp.name}.md`);
+console.log(`\nwrote .scratch/rejections/runs/${exp.name}.md`);

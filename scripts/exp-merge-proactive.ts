@@ -1,7 +1,7 @@
 /**
  * CONFIRMATION MERGE — the proactive bracket.
  *
- * Three changes from `docs/rejections/proposed-changes-2026-08-01.md` each won in isolation and all
+ * Three changes from `.scratch/rejections/proposed-changes-2026-08-01.md` each won in isolation and all
  * three splice into the SAME bracket:
  *
  *   §4 recent-openers list   (tail of lull / morning / ignored cue)

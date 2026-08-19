@@ -390,7 +390,7 @@ async function stageJudge() {
   const name = process.argv[3];
   if (!name) throw new Error('usage: judge <run-name>');
   const { readFileSync } = await import('node:fs');
-  const dir = resolve(process.cwd(), 'docs/rejections/runs');
+  const dir = resolve(process.cwd(), '.scratch/rejections/runs');
   const samples: Sample[] = readFileSync(resolve(dir, `${name}.jsonl`), 'utf8')
     .split('\n')
     .filter(Boolean)
@@ -461,7 +461,7 @@ function extraTable(samples: Sample[], pos: Position[]): string {
 
 async function runFull(exp: Experiment): Promise<Sample[]> {
   const samples = await run(exp);
-  const outDir = exp.outDir ?? resolve(process.cwd(), 'docs/rejections/runs');
+  const outDir = exp.outDir ?? resolve(process.cwd(), '.scratch/rejections/runs');
   const head = exp.positions
     .map((p) => `- #${p.targetId} ${weekday(p.createdAt)} ${hhmm(p.createdAt)} (${period(p.createdAt)})${ACTIVE_PROBES.has(p.targetId) ? ` — PROBE "${ACTIVE_PROBES.get(p.targetId)}"` : ''}`)
     .join('\n');
@@ -560,7 +560,7 @@ async function stageKp() {
     .filter((s) => !s.error && s.text.trim())
     .map((s) => `- **${s.arm}** #${s.targetId} @${hhmm(stampBy.get(s.targetId)!)} (${period(stampBy.get(s.targetId)!)}) [${kpScore(s.text, stampBy.get(s.targetId)!).period}] — ${s.text.replace(/\n/g, ' / ')}`);
   const body = `# clock-kp — "${KP_TEXT}"\n\n${lines.join('\n')}\n\n## All answers\n\n${detail.join('\n')}\n`;
-  writeFileSync(resolve(process.cwd(), 'docs/rejections/runs/clock-kp.md'), body, 'utf8');
+  writeFileSync(resolve(process.cwd(), '.scratch/rejections/runs/clock-kp.md'), body, 'utf8');
   console.log(lines.join('\n'));
 }
 

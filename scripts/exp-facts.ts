@@ -564,7 +564,7 @@ function perProbe(scored: Scored[], arms: string[]): string[] {
 }
 
 function writeReport(name: string, scored: Scored[], arms: string[]): void {
-  const outDir = resolve(process.cwd(), 'docs/rejections/runs');
+  const outDir = resolve(process.cwd(), '.scratch/rejections/runs');
   mkdirSync(outDir, { recursive: true });
   const rows = summarize(scored);
   const lines: string[] = [`# ${name}`, ''];
@@ -635,7 +635,7 @@ async function rescore() {
     ['facts-4-opener', OPENER_PROBES],
   ];
   for (const [name, subset] of runs) {
-    const path = resolve(process.cwd(), 'docs/rejections/runs', `${name}.jsonl`);
+    const path = resolve(process.cwd(), '.scratch/rejections/runs', `${name}.jsonl`);
     if (!existsSync(path)) continue;
     activeProbes = subset;
     byHost = new Map(subset.map((p) => [p.host, p]));

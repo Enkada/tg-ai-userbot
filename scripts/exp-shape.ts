@@ -221,7 +221,7 @@ async function go(exp: Experiment, shapeArms: string[]): Promise<Sample[]> {
     `Cross-shape similarity of a rolled sequence: **${pct(v.rolled)}** vs control sequence **${pct(v.control)}**.`,
     '',
   ].join('\n');
-  writeFileSync(resolve(process.cwd(), `docs/rejections/runs/${exp.name}.md`), md, 'utf8');
+  writeFileSync(resolve(process.cwd(), `.scratch/rejections/runs/${exp.name}.md`), md, 'utf8');
   return samples;
 }
 
@@ -308,7 +308,7 @@ async function stage2(): Promise<void> {
 
 /** Re-scores an existing run's JSONL without regenerating — for metrics added after the fact. */
 function rescore(name: string): void {
-  const rows = readFileSync(resolve(process.cwd(), `docs/rejections/runs/${name}.jsonl`), 'utf8')
+  const rows = readFileSync(resolve(process.cwd(), `.scratch/rejections/runs/${name}.jsonl`), 'utf8')
     .trim()
     .split('\n')
     .map((l) => JSON.parse(l) as Sample);

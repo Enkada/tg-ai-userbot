@@ -1,7 +1,7 @@
 /**
  * F3c — `# Your recent openers` block for proactive openers only.
  *
- * The failure (docs/rejections/analysis-2026-08-01.md, F3c): `/delete` soft-deletes, so a deleted
+ * The failure (.scratch/rejections/analysis-2026-08-01.md, F3c): `/delete` soft-deletes, so a deleted
  * opener leaves the context window and she has no record she ever sent it. Observed twice: the
  * "pick one song" question asked at 13:01, deleted, asked again at 21:15.
  *

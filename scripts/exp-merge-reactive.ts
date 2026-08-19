@@ -52,7 +52,7 @@ import { openRouter } from '../src/providers/openrouter.js';
 import { sanitize } from '../src/sanitize.js';
 import { finalizeReply } from '../src/tools.js';
 
-const OUT_DIR = resolve(process.cwd(), 'docs/rejections/runs');
+const OUT_DIR = resolve(process.cwd(), '.scratch/rejections/runs');
 
 // ---- Clock rendering (verbatim from exp-clock.ts) ---------------------------------------------
 

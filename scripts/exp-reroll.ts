@@ -163,7 +163,7 @@ const ARMS: SpreeArm[] = [
 // sample. This loop is the same machinery with the hook moved inside the k loop; output still
 // passes through the production sanitize + finalizeReply and is scored by cue-test's `score`.
 
-const OUT_DIR = resolve(process.cwd(), 'docs/rejections/runs');
+const OUT_DIR = resolve(process.cwd(), '.scratch/rejections/runs');
 
 async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let last: unknown;

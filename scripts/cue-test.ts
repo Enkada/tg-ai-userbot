@@ -233,7 +233,7 @@ export interface Experiment {
   mode?: 'reactive' | 'proactive';
   /** The director cue for `mode: 'proactive'`. Defaults to the production lull cue. */
   cue?: (pos: Position) => string;
-  /** Where to write results. Defaults to `docs/rejections/runs`. */
+  /** Where to write results. Defaults to `.scratch/rejections/runs`. */
   outDir?: string;
 }
 
@@ -245,7 +245,7 @@ export interface Experiment {
  * user would have seen — tool calls stripped, protocol markers suppressed.
  */
 export async function run(exp: Experiment): Promise<Sample[]> {
-  const outDir = exp.outDir ?? resolve(process.cwd(), 'docs/rejections/runs');
+  const outDir = exp.outDir ?? resolve(process.cwd(), '.scratch/rejections/runs');
   mkdirSync(outDir, { recursive: true });
   const jsonl = resolve(outDir, `${exp.name}.jsonl`);
   writeFileSync(jsonl, '');
@@ -452,7 +452,7 @@ export function report(exp: Experiment, samples: Sample[]): string {
 /** Runs an experiment and writes `<name>.md` + `<name>.jsonl`; returns the scores. */
 export async function runAndReport(exp: Experiment): Promise<ArmScore[]> {
   const samples = await run(exp);
-  const outDir = exp.outDir ?? resolve(process.cwd(), 'docs/rejections/runs');
+  const outDir = exp.outDir ?? resolve(process.cwd(), '.scratch/rejections/runs');
   writeFileSync(resolve(outDir, `${exp.name}.md`), report(exp, samples), 'utf8');
   const scores = score(samples, exp.positions);
   console.table(scores.map((s) => ({ ...s, agreementOpener: `${(100 * s.agreementOpener).toFixed(0)}%` })));
