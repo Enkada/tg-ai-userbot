@@ -510,7 +510,7 @@ register({
     // list telling her what not to repeat. Regenerating it as a reply would answer whatever the
     // user last said — possibly hours ago — so the cue is rebuilt from the row's stored kind
     // instead. Null for an ordinary reply, which takes the reactive path below unchanged.
-    const reachout = reachoutKindOf(chatId, last);
+    const reachout = reachoutKindOf(last.kind);
 
     const systemPrompt = renderSystemPrompt({ userName, chatId }, { includeMemory: !reachout });
     const oldIds = last.tgMessageIds;

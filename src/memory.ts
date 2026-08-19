@@ -133,14 +133,6 @@ export interface LastAssistant {
   tgMessageIds: number[] | null;
   /** Which generation path produced the reply — what `/reroll` rebuilds its context from. */
   kind: MessageKind;
-  /**
-   * The legacy bot-initiated flag. Only interesting when it disagrees with `kind`: a row
-   * written before the `kind` column existed reads `reply` + `proactive: true`, which is a
-   * reach-out whose framing was never recorded (see proactive.ts:reachoutKindOf).
-   */
-  proactive: boolean;
-  /** Epoch ms the row was stored, which dates the legacy framing guess in `reachoutKindOf`. */
-  createdAt: number;
 }
 
 /** Returns the latest non-deleted assistant message for a chat, or null. */
@@ -151,8 +143,6 @@ export function getLastAssistant(chatId: number): LastAssistant | null {
       content: messages.content,
       tgMessageIds: messages.tgMessageIds,
       kind: messages.kind,
-      proactive: messages.proactive,
-      createdAt: messages.createdAt,
     })
     .from(messages)
     .where(

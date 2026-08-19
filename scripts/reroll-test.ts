@@ -28,7 +28,7 @@ import {
   saveMessage,
   getSummaryState,
 } from '../src/memory.js';
-import { buildReachoutCue, reachoutKindOf } from '../src/proactive.js';
+import { buildReachoutCue, reachoutKindOf, type ReachoutKind } from '../src/proactive.js';
 import { ephemeralSearchStrategy, generateReply } from '../src/generate.js';
 import { renderSystemPrompt } from '../src/prompts/render.js';
 import { initProvider } from '../src/llm.js';
@@ -59,7 +59,7 @@ function check(label: string, ok: boolean, detail = ''): void {
   if (!ok) failures++;
 }
 
-const KINDS: MessageKind[] = ['reachout_morning', 'reachout_lull', 'reachout_ignored'];
+const KINDS: ReachoutKind[] = ['reachout_morning', 'reachout_lull', 'reachout_ignored'];
 const SIGNATURE: Record<string, RegExp> = {
   reachout_morning: /it's morning and .* hasn't messaged yet/,
   reachout_lull: /there's a natural lull/,
@@ -103,26 +103,17 @@ check('reply: proactive stays false', replyRow.proactive === false);
 // ---- 2. reachoutKindOf resolution ----------------------------------------------------------
 console.log('\n== 2. kind resolution ==');
 for (const kind of KINDS) {
-  check(`${kind} resolves to itself`, reachoutKindOf(chatId, { kind, proactive: true }) === kind);
+  check(`${kind} resolves to itself`, reachoutKindOf(kind) === kind);
 }
-check(
-  'plain reply resolves to null',
-  reachoutKindOf(chatId, { kind: 'reply', proactive: false, createdAt: Date.now() }) === null,
-);
-const legacy = reachoutKindOf(chatId, { kind: 'reply', proactive: true, createdAt: Date.now() });
-check('legacy row resolves to some reach-out', legacy !== null && KINDS.includes(legacy), String(legacy));
-// The legacy guess is dated from when the row was SENT. An evening opener rerolled the next
-// morning must not come back as a good-morning greeting.
-const at = (h: number) => new Date(new Date().setHours(h, 0, 0, 0)).getTime();
-const morningHour = Math.max(0, config.proactive.morningEndHour - 1);
-check(
-  'legacy: evening opener never guesses morning',
-  reachoutKindOf(chatId, { kind: 'reply', proactive: true, createdAt: at(21) }) !== 'reachout_morning',
-);
-check(
-  'legacy: morning opener guesses morning',
-  reachoutKindOf(chatId, { kind: 'reply', proactive: true, createdAt: at(morningHour) }) === 'reachout_morning',
-);
+check('plain reply resolves to null', reachoutKindOf('reply') === null);
+// A row written before the kind column carries proactive=true and kind='reply'. Its framing was
+// never recorded and is deliberately not guessed at, so it rerolls as an ordinary reply.
+const legacyId = saveMessage(chatId, 'assistant', 'a legacy opener', [999_200]);
+seeded.push(legacyId);
+db.update(messages).set({ proactive: true }).where(eq(messages.id, legacyId)).run();
+const legacyRow = getLastAssistant(chatId)!;
+check('legacy row is still flagged proactive', legacyRow.kind === 'reply');
+check('legacy row takes the reactive path', reachoutKindOf(legacyRow.kind) === null);
 // A future non-reach-out kind must not flip the proactive flag (which feeds the openers clause).
 check('isReachoutKind: reply is not a reach-out', !isReachoutKind('reply'));
 check('isReachoutKind: all three reach-outs are', KINDS.every(isReachoutKind));
@@ -159,7 +150,7 @@ check('lull shape varies across rerolls', shapes.size > 1, `${shapes.size} disti
 console.log('\n== 5. reroll context ==');
 const last = getLastAssistant(chatId)!;
 check('getLastAssistant reports the kind', last.kind === 'reachout_ignored', last.kind);
-const resolved = reachoutKindOf(chatId, last)!;
+const resolved = reachoutKindOf(last.kind);
 // The dev DB has no summaries, so seed one — otherwise the memory block is empty either way
 // and the assertion would pass vacuously.
 const dayStart = new Date().setHours(0, 0, 0, 0) - 86_400_000;
@@ -195,7 +186,7 @@ if (process.env.LIVE) {
   for (const kind of KINDS) {
     db.update(messages).set({ kind }).where(eq(messages.id, secondOpener)).run();
     const row = getLastAssistant(chatId)!;
-    const k = reachoutKindOf(chatId, row)!;
+    const k = reachoutKindOf(row.kind)!;
     const sys = renderSystemPrompt({ userName, chatId }, { includeMemory: false });
     const out = await generateReply(
       sys,

@@ -67,8 +67,8 @@ export const messages = sqliteTable(
      * what it was. The kind is what lets the reroll rebuild the original context.
      *
      * User rows and ordinary reactive replies are `reply` (the default), which is also what
-     * every row written before this column existed carries — see {@link isReachoutKind} for
-     * how a legacy proactive row is still recognised.
+     * every row written before this column existed carries. Those rows are treated as plain
+     * replies by the reroll; their original framing was never recorded and is not guessed at.
      */
     kind: text('kind', { enum: MESSAGE_KINDS }).notNull().default('reply'),
     /**

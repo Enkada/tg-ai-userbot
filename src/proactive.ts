@@ -138,28 +138,16 @@ export function buildReachoutCue(chatId: number, kind: ReachoutKind, userName: s
 }
 
 /**
- * The reach-out kind a stored assistant row should be regenerated as, or null when the row is
- * an ordinary reply and `/reroll` should take its normal reactive path.
+ * The reach-out kind a stored row should be regenerated as, or null when `/reroll` should take
+ * its normal reactive path.
  *
- * Normally this is just the row's recorded `kind`. The fallback exists for rows written before
- * that column did: they carry only the `proactive` boolean, so the framing they were generated
- * with is genuinely unrecoverable and is re-derived here from the clock and the current ignored
- * streak — best effort, and only ever reachable for openers already sitting in the chat at
- * deploy time. Nothing is back-filled into the DB, because a guess written to a column stops
- * looking like a guess.
+ * Only the recorded kind counts. Rows written before that column existed carry no framing, and
+ * nothing here invents one for them: they reroll as ordinary replies, exactly as they did
+ * before this existed. At most one such row per chat is ever the last message, and only until
+ * the next reach-out is written with a real kind.
  */
-export function reachoutKindOf(
-  chatId: number,
-  row: { kind: MessageKind; proactive: boolean; createdAt: number },
-): ReachoutKind | null {
-  if (row.kind !== 'reply') return row.kind;
-  if (!row.proactive) return null;
-  // Dated from when the row was sent, not from now: an unanswered evening opener rerolled the
-  // next morning would otherwise come back rebuilt as a good-morning greeting.
-  if (new Date(row.createdAt).getHours() < config.proactive.morningEndHour) return 'reachout_morning';
-  // ignoredCount was bumped to the attempt number when the opener was sent, so 1 is still the
-  // first (time-agnostic) one.
-  return (getProactiveState(chatId)?.ignoredCount ?? 0) <= 1 ? 'reachout_lull' : 'reachout_ignored';
+export function reachoutKindOf(kind: MessageKind): ReachoutKind | null {
+  return kind === 'reply' ? null : kind;
 }
 
 /**
