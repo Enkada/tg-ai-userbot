@@ -10,3 +10,7 @@ prompts/system/persona.txt
 
 # Local scratch: experiments, analyses, plans, generated test assets. Never committed.
 .scratch/
+
+# Personal docs: agent reports, chat analyses, experiment data with chat excerpts, persona texts,
+# prod host details. The repo is public, so this stays local. See docs/README.md.
+docs/private/

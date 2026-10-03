@@ -1,251 +1,145 @@
 # tg-ai-userbot
 
-A Telegram **UserBot** built on the MTProto API (via [mtcute](https://mtcute.dev)) — _not_ a @BotFather bot. It logs in as a real user account and will grow into an "AI Companion" (local LLMs / OpenRouter, queue system, memory) in later steps.
+An AI companion ("Sara" by default) that lives in a Telegram DM. It runs as a **userbot**: it
+logs in to a real Telegram user account over MTProto (via [mtcute](https://mtcute.dev)), not as a
+@BotFather bot, so the conversation looks and behaves like chatting with a person: read receipts,
+"typing…", several short message bubbles per reply.
 
-## Current features
+The character is written as an honest AI. The default persona says she is a self-aware AI living
+in the chat, with no body, and the technical prompt layer tells her plainly what she cannot do
+(voice, video, files). The human-like part is the pacing and texting style; she doesn't claim to
+be a person.
 
-- Logs in as a user account via MTProto.
-- **LLM chat with fallback**: non-command DMs are answered by a local llama.cpp model
-  (OpenAI-compatible `/v1/chat/completions`, no streaming). If the local server is offline
-  at startup, the bot falls back to [OpenRouter](https://openrouter.ai) (cloud) when an API
-  key is configured. The provider is chosen once, at startup.
-- **Conversation memory**: every user/AI message is stored in SQLite (Drizzle ORM).
-  The model is given a cache-friendly context window (see below).
-- **Long-term memory** (opt-in): each conversation day is compressed overnight into a short
-  first-person diary entry; the newest few are injected into the system prompt as a `# Memory`
-  block, so the character recalls past days beyond the live window (see below).
-- Renders **Markdown** in replies (bold, code, links…).
-- Shows a live **"typing…"** status while the model generates (refreshed every ~5s).
-- **Human pacing**: messages aren't read the instant they arrive — the longer the chat has
-  been idle, the longer the read receipt takes (sqrt curve, jittered, capped at ~15s, with an
-  occasional near-instant "had the phone in hand" read), and a short silent beat separates
-  the read receipt from the typing indicator (for photos, the vision pass runs inside that
-  beat). Commands and unsupported message types are still read instantly.
-- **Schedule awareness**: `prompts/system/schedule.txt` describes the user's usual week
-  (weekday sections + `HH:MM` blocks, with date-override sections for vacations); the reply
-  cue and proactive openers carry a one-line "he's probably at the office, working (until
-  ~18:00)" prior so the model stops guessing his day. A companion time-gap heads-up marks
-  how long ago the conversation above went quiet, so hours-old messages stop reading as
-  just-said. Both tested against prod replays (see `scripts/schedule-cue-test.ts`).
-- **Commands**: `/help`, `/status` (`/s`), `/openrouter` (`/or`), `/nuke`, `/delete` (`/d`), `/reroll` (`/r`), `/update` (`/u`), `/context` (`/c`), `/prompt` (`/p`), `/persona`, `/name`, `/dump`.
-- **Self-cleaning commands**: a command message is deleted (for both sides) once handled,
-  and command output lives in a single reusable **panel** message that each command edits
-  in place — swept away as soon as you send your next normal message. The bookkeeping is
-  persisted in SQLite, so a restart can't orphan stray output.
-- **DMs only**: groups, supergroups and channels are ignored.
-- **Whitelist**: only configured Telegram user IDs are served; everyone else is ignored.
-- Ignores its own outgoing messages (no feedback loops).
+Single-user by design: only Telegram user ids in `WHITELIST` are answered, and only in private
+chats.
 
-### Commands
+## Features
 
-| Command           | Description                                                            |
-| ----------------- | --------------------------------------------------------------------- |
-| `/help`           | List available commands                                               |
-| `/status` (`/s`)  | Bot uptime/account + both LLM providers (state, model, vision, which is active) |
-| `/openrouter` (`/or`) | OpenRouter config, model context/vision, and free-tier usage/limits (`/key`) |
-| `/nuke`           | Erase the whole Telegram chat for both sides (revoke) **and** wipe memory + summaries; asks for `/nuke confirm` above 20 stored messages |
-| `/delete` (`/d`)  | Delete the last N messages for both sides — `/d` = 1, `/d N` = N; soft-flags memory like `/nuke` |
-| `/reroll` (`/r`)  | Regenerate the last reply (re-runs the model without it) and edits the message in place. Context-aware: a proactive reach-out is regenerated as a reach-out — same director cue, same withheld memory block, a freshly rolled opener shape — not as an answer to whatever was last said |
-| `/update` (`/u`)  | Replace the last reply with your own text — `/u <new text>`; edits the message in place |
-| `/context` (`/c`) | Token usage (system prompt + window) vs. the model's max context, plus window re-anchoring state |
-| `/prompt` (`/p`)  | Show the prompt the LLM receives — system prompt + the first 3 and last 3 messages — as a code block |
-| `/persona`        | View or edit the persona layer from chat, no restart: `/persona` shows the raw text (`{{tags}}` intact, ready to copy), `set <text>` replaces it, `undo` swaps with the previous version (run twice to redo — handy for A/B), `default` resets to the shipped default |
-| `/name`           | Show or set the character name (the `{{char}}` tag): `/name` shows it, `/name <name>` changes it live (stored in the DB, survives restarts). Default `Sara` |
-
-Single-letter shorthands: `/s`, `/d`, `/r`, `/u`, `/c`, `/p`. `/reroll` and `/update` rewrite the
-last reply **in place** — they overwrite that one record instead of appending, so memory and
-the Telegram message stay in sync without piling up edits.
-
-Commands keep the chat tidy: the `/command` message itself is deleted (for both sides)
-as soon as it's handled, and output is rendered into one reusable **panel** message per
-chat — a follow-up command edits the panel in place instead of adding another bubble, and
-your next normal (non-command) message sweeps it away entirely. So checking `/context`,
-then replying, leaves no trace of either the command or its output. `/dump`'s file (which
-can't be an edit) and error notices are tracked the same way and swept with the panel.
-The tracked message ids live in SQLite (`command_debris`), so output stranded by a
-restart or crash is collected on the next interaction. `/reroll` and `/update` remove the
-panel instead of writing to it — their real output is the replaced reply itself.
-
-### Memory & the context window
-
-Messages are stored in SQLite. Rather than a 1-message sliding window (which would
-shift the prompt prefix on every message and force llama.cpp to re-evaluate the entire
-conversation each time), the window is **anchored and grows from 60 up to 79 messages,
-then snaps back to 60** every 20th message. Between snaps the older messages are
-byte-identical, so the llama.cpp KV cache is reused — roughly 19 cheap turns per 1 full
-recompute. `/nuke` and `/delete` soft-delete via a `deleted` flag (nothing is physically
-removed).
-
-Before the window is sent to the model, **consecutive messages from the same role are
-merged into one** (their text joined by a blank line). Chat templates assume strictly
-alternating user/assistant turns, so two `user` (or two `assistant`) objects in a row can
-make the template throw or produce a malformed prompt — which happens naturally after
-`/delete`-ing a reply, or when several messages arrive back-to-back.
-
-The system prompt is assembled from these layers, in order:
-
-| Layer | File | Owner | Notes |
-| ----- | ---- | ----- | ----- |
-| Persona | DB (`persona_versions`) | **user** | Who the character is + chat style. Edited from chat via `/persona` (applies instantly, no restart). Never overwritten by app updates. |
-| Technical | `prompts/technical.txt` | app | Current literal app limits (no audio/video/files yet) + dynamic context. Evolves as features land. |
-| Memory | _(generated)_ | app | The newest daily summaries for this chat as a `# Memory` block (see below). Per-chat and dynamic; omitted when there are none. |
-| Tools | `prompts/tools.txt` | app | The tool-call protocol scaffold; its `{{tools}}` tag is filled with the available tools, and the whole layer is omitted when no tool is configured. |
-
-The persona lives in the DB as an **append-only version log** — the newest row is the
-active persona, every `/persona set|undo|default` appends a row, so the full edit history
-is inspectable in SQLite and one-step undo (which is itself undoable) survives restarts.
-On first start with an empty table it's seeded from the legacy `prompts/persona.txt` if
-one exists (a pre-DB install keeps its tweaked persona; the file is only read, never
-written), otherwise from `persona.default.txt` — the shipped, neutral starting persona
-and the source for `/persona default`.
-
-All layers support `{{tag}}` placeholders that are substituted per message:
-
-| Tag          | Substituted with                                   |
-| ------------ | -------------------------------------------------- |
-| `{{char}}`   | Character name (default `Sara`; change live with `/name`) |
-| `{{user}}`   | The Telegram user's display name (not username)    |
-| `{{date}}`   | Current date, e.g. `June 10, 2026`                 |
-| `{{day}}`    | Day of week, e.g. `Monday`                         |
-| `{{period}}` | Day period: `morning` / `afternoon` / `evening` / `night` |
-
-Unknown tags are left as-is. Because `{{date}}`/`{{day}}`/`{{period}}` change over time,
-they shift the cached prompt prefix at those boundaries (e.g. when the period flips) —
-expected, given they're meant to be dynamic.
-
-### Long-term memory (daily summaries)
-
-The context window only holds the last ~60–79 messages. To remember further back, a scheduler
-(`src/summary.ts`) compresses each finished day of conversation into a short first-person diary
-entry — `Headline` / `Happened` / `Mood` / `Follow-ups` — and the newest `SUMMARY_MAX_KEPT`
-entries are injected as the **`# Memory`** layer above. Off by default (`SUMMARY_ENABLED=true`);
-always runs through **OpenRouter** (`SUMMARY_MODEL`, default `google/gemini-2.5-flash-lite`),
-independent of the active chat provider, so it has full context regardless of the local model.
-
-- **Logical day**: a "day" runs `SUMMARY_CUTOFF_HOUR`→cutoff (default 3am→3am, in `TIMEZONE`),
-  so a late-night session crossing midnight stays in one entry instead of being split.
-- **When**: a day is summarized only after it has fully ended and only if it holds more than
-  `SUMMARY_MIN_MESSAGES` messages. The scheduler is a plain interval (`SUMMARY_TICK_MS`), not tied
-  to the message queue — it reads completed, immutable past days, so it never races a live reply.
-- **State** (`summary_state`) lives in the DB, so the schedule survives restarts and catches up on
-  any day missed during downtime. Existing history from before the feature is switched on is **not**
-  back-filled — the day you enable it becomes the first entry.
-- `/nuke` soft-deletes a chat's summaries along with its messages.
-- **Reactive replies only**: the `# Memory` block is withheld from proactive openers. With no
-  user message to anchor on, an opener otherwise fixates on the single most salient summary and
-  rehashes it every reach-out; openers still carry the live recent-message window for short-term
-  continuity.
-- Roll-ups (weekly/monthly tiers, the `level` column) are reserved but not produced yet.
+- **Streaming, multi-bubble replies.** Tokens stream over SSE and are split into chat bubbles on
+  sentence boundaries while the model is still generating. Each bubble is paced like typing.
+  Typographic "AI tells" (em dashes, smart quotes, `…`) are rewritten to plain keyboard characters.
+- **Human pacing.** The longer the chat has been idle, the longer the read receipt takes (sqrt
+  curve, jittered, capped at 15 s by default). There is also a short silent beat between the read
+  receipt and "typing…".
+- **Photo vision.** Incoming photos are captioned once by a vision model (the active model if it
+  has vision, otherwise a dedicated `CAPTION_MODEL`). The caption is stored, and the chat model
+  sees it as a `[<user> sent a photo: …]` record. Other media types are ignored.
+- **Web search tool.** A `web_search` tool backed by [Tavily](https://tavily.com), using a
+  text-based `<tool_call>` protocol. Results are stored with the triggering message.
+- **Selfies.** A `send_selfie` tool: the model describes a picture in prose, a cheap model turns
+  that into Danbooru tags, and an SDXL ComfyUI workflow runs on a RunPod serverless endpoint.
+- **Long-term memory.** Nightly per-day summaries (a `# Memory` block with the newest 7) and a
+  nightly diff pass that maintains durable facts about the user (a `# About <user>` block).
+- **Schedule awareness.** `prompts/system/schedule.txt` describes the user's usual week. One
+  hedged line about where he probably is right now rides the reply cue, plus a heads-up when the
+  previous messages are hours or days old.
+- **Verbal-tic control.** `src/tics.ts` launders her own recent tics out of the context window,
+  strips `, huh` from outgoing text, and adds an avoid-list to the reply cue.
+- **Proactive messaging.** Morning greetings and lull/ignored reach-outs on an escalating
+  schedule. Implemented, **disabled by default** (`PROACTIVE_ENABLED=false`).
+- **Diary channel.** One to three posts a day to a private channel, written in her voice.
+  Implemented, **disabled by default** (`DIARY_ENABLED=false`).
+- **Chat commands** (`/status`, `/reroll`, `/dump`, `/facts`, …) with self-cleaning output, gated
+  by `CHAT_COMMANDS` (`all`, `none`, or a list). With commands disabled, their text reaches her as
+  ordinary messages.
+- **Two LLM backends.** A local llama.cpp server is used if it is reachable at startup;
+  otherwise OpenRouter. Side passes (summaries, facts, booru tags, diary, caption fallback) always
+  go through OpenRouter.
 
 ## Stack
 
-- Node.js + TypeScript (ESM)
-- [mtcute](https://mtcute.dev) (`@mtcute/node`) — MTProto client + SQLite session storage
-- Planned: better-sqlite3 + Drizzle ORM, LLM queue, memory management
+TypeScript (ESM) run directly with [tsx](https://tsx.is) (no build step in production) ·
+[mtcute](https://mtcute.dev) (MTProto) · SQLite via better-sqlite3 + [drizzle-orm](https://orm.drizzle.team)
+(migrations in `drizzle/`) · OpenRouter / llama.cpp (OpenAI-compatible chat completions,
+streamed) · undici (HTTP and optional proxy) · pm2 (production process manager) · pnpm.
 
 ## Setup
 
-1. Install dependencies:
-   ```sh
-   npm install
-   ```
-2. Configure `.env` (already populated for this account). See `.env.example` for the keys:
-   - `API_ID`, `API_HASH` — from https://my.telegram.org
-   - `PHONE` — account phone in international format
-   - `WHITELIST` — comma-separated Telegram user IDs allowed to interact
-   - `SESSION_PATH` — where the SQLite session is stored (default `data/userbot.session`)
-   - `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` — the local llama.cpp server (primary)
-   - `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` — cloud fallback (leave the key blank to disable)
-   - `CAPTION_MODEL` — optional OpenRouter vision slug for captioning photos when the active chat model is text-only (blank = photos dropped without vision)
-   - `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, … — shared generation params (apply to either provider)
-   - `LLM_TOP_P`, `LLM_MIN_P`, `LLM_PRESENCE_PENALTY`, `LLM_FREQUENCY_PENALTY` — optional chat-only sampling knobs; blank = not sent (provider default applies)
-
-## First login (one-time, interactive)
-
-Run the dedicated, watch-free login script (NOT `npm run dev` — watch mode intercepts
-keystrokes and breaks the code prompt):
+Requires Node.js 20.3+ (the code uses `AbortSignal.any`) and pnpm.
 
 ```sh
-npm run login
+pnpm install
+cp .env.example .env    # then fill it in
 ```
 
-> **Run this in PowerShell or Windows Terminal, not Git Bash.** Git Bash uses MinTTY,
-> which Node does not treat as a real TTY, so interactive input is unreliable there.
+At minimum, set `API_ID` / `API_HASH` (from https://my.telegram.org), `PHONE` (the userbot
+account), `WHITELIST` (the Telegram user id(s) she talks to) and an LLM backend: a llama.cpp
+server at `LOCAL_LLM_BASE_URL`, or `OPENROUTER_API_KEY` + `OPENROUTER_MODEL`. Every variable is
+documented in [docs/operations/configuration.md](docs/operations/configuration.md).
 
-Telegram sends a login code to your Telegram app (or SMS); type it at the prompt. If the
-account has 2FA, you'll also be asked for the password.
+First login (one time, interactive) creates the session file at `SESSION_PATH`:
 
+```sh
+pnpm login
 ```
-Enter the login code: 12345
-Enter your 2FA password: ********   # only if 2FA is enabled
+
+On Windows, run this from **PowerShell**, not Git Bash. Git Bash's terminal does not give the
+script a usable interactive stdin for the code / 2FA prompts.
+
+Then start the bot:
+
+```sh
+pnpm dev     # watch mode
+pnpm start   # plain run
 ```
 
-After a successful login the session is saved to `data/userbot.session`, and subsequent
-runs (`npm run dev` / `npm run start`) connect without prompting.
+Migrations are applied automatically at startup. The persona is seeded into the database from
+`prompts/system/persona.default.txt` on first run and versioned in the `persona_versions` table.
+`/persona` can edit it from chat, but production keeps chat commands off and ships persona changes
+as evaluated revisions instead (see [deploy](docs/operations/deploy.md) and
+[design principles](docs/design/principles.md)). The character name is stored in the database too
+(default `Sara`, changed with `/name`).
+
+Do not run the same Telegram account locally and on a server at the same time.
 
 ## Scripts
 
-| Script          | Description                                  |
-| --------------- | -------------------------------------------- |
-| `npm run dev`   | Run with `tsx` + watch (auto-reload on edit) |
-| `npm run start` | Run once with `tsx` (no watch)               |
-| `npm run build` | Compile TypeScript to `dist/`                |
-| `npm run serve` | Run the compiled build from `dist/`          |
-| `npm run db:generate` | Generate a new Drizzle migration after editing `src/db/schema.ts` |
+| Script | Command | Purpose |
+|:--|:--|:--|
+| `pnpm login` | `tsx src/login.ts` | One-time interactive MTProto sign-in; writes the session file. |
+| `pnpm dev` | `tsx watch src/index.ts` | Run with reload on change. |
+| `pnpm start` | `tsx src/index.ts` | Run once. |
+| `pnpm db:generate` | `drizzle-kit generate` | Generate a migration after editing `src/db/schema.ts`. |
+| `pnpm build` / `pnpm serve` | `tsc` / `node dist/index.js` | Still in `package.json`, but **not used in production**. Prod runs the TS source via `node --import tsx` under pm2 (see `ecosystem.config.cjs` and [deploy](docs/operations/deploy.md)). |
 
-Migrations in `./drizzle` are applied automatically at startup.
+Typecheck: `npx tsc --noEmit -p .` (covers `src/` only, since `scripts/` isn't in the tsconfig
+`include`).
 
 ## Project layout
 
 ```
 src/
-  index.ts      Entry point: client setup, message handling, login, shutdown
-  config.ts     Env loading, validation, whitelist, LLM + DB settings
-  commands.ts   Command registry + parser (/help, /status, /openrouter, /reroll, …)
-  panel.ts      Command-output panel (edit-in-place message) + debris tracking/sweep
-  llm.ts        Provider facade: picks a backend at startup, re-exports the chat API
-  providers/
-    types.ts    Shared message helpers + provider interface + OpenAI-compatible call
-    llamacpp.ts Local llama.cpp backend (chat, vision, exact token count, max ctx)
-    openrouter.ts OpenRouter backend (chat, vision, /key usage, estimated tokens)
-  prompt.ts     System prompt assembly (persona + technical) + {{tag}} templating
-  persona.ts    Persona layer state: DB-backed version log, /persona set/undo/default
-  tools.ts      Tool registry + pseudo tool-call protocol (renders prompts/tools.txt)
-  format.ts     Model-output → Telegram Markdown rendering
-  typing.ts     "typing…" status helper
-  memory.ts     Conversation memory + cache-friendly context windowing
-  db/
-    schema.ts   Drizzle schema (messages table)
-    index.ts    SQLite connection + migrations
-  logger.ts     Timestamped logger
+  index.ts            entry: Telegram client, message dispatch, startup
+  config.ts           all env parsing
+  generate.ts         reply generation + tool loop + tail cue
+  memory.ts           DB access, context window, day transcripts
+  prompts/index.ts    every model-facing string (cues, block headers, record formats)
+  prompts/render.ts   system-prompt assembly ({{tags}}, layer order)
+  send.ts chunker.ts  streaming bubbles, sentence splitting
+  tics.ts             verbal-tic control
+  commands.ts panel.ts  chat commands and their self-cleaning output
+  summary.ts facts.ts diary.ts proactive.ts selfie.ts search.ts schedule.ts
+  providers/          llama.cpp and OpenRouter clients (shared SSE core)
+  db/                 drizzle schema + connection
 prompts/
-  persona.default.txt  Shipped default persona (tracked; source for /persona default)
-  persona.txt          Legacy persona file (git-ignored; only read once to seed the DB)
-  technical.txt        App-owned technical layer (limits + dynamic context)
-  tools.txt            App-owned tool-protocol scaffold (has {{tools}})
-drizzle/        Generated SQL migrations (committed)
-data/           SQLite session + memory DB (git-ignored)
+  system/             persona.default, appearance, technical, schedule
+  tools/              tool-call protocol, selfie rules
+  passes/             summary, facts, diary, booru-tag side passes
+scripts/              replay harness and prompt experiments (not built, not deployed)
+drizzle/              SQL migrations
+ecosystem.config.cjs  pm2 process definition
 ```
 
-## Adding a command
+The full module map is in [docs/architecture/overview.md](docs/architecture/overview.md).
 
-Register it in `src/commands.ts`:
+## Docs
 
-```ts
-register({
-  name: 'ping',
-  description: 'Reply with pong',
-  handler: async ({ reply }) => {
-    await reply('pong');
-  },
-});
-```
+Start at [docs/README.md](docs/README.md). Main pages:
 
-It is automatically picked up by `/help` and the router. Use `ctx.reply` for output —
-it renders into the self-cleaning panel; a raw `client.sendText` would leave a message
-nothing ever sweeps up.
-
-## Notes
-
-- `.env`, `data/`, and `*.session` files are git-ignored — never commit credentials or sessions.
-- This is a userbot: automating a user account is against Telegram's ToS if abused. Use responsibly on your own account.
+- [Architecture overview](docs/architecture/overview.md): the message pipeline, prompt layers, tail cue, module map
+- [Memory](docs/architecture/memory.md): window, daily summaries, facts, diary
+- [Verbal tics](docs/architecture/tics.md)
+- [Control plane](docs/architecture/control-plane.md): commands, panel, `CHAT_COMMANDS`
+- [Proactive messaging and tools](docs/architecture/proactive-and-tools.md): reach-outs, search, selfies, captions, schedule
+- [Deploy](docs/operations/deploy.md) and [configuration](docs/operations/configuration.md)
+- [Evals](docs/development/evals.md): the replay harness and how prompt changes are tested

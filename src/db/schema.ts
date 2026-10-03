@@ -353,7 +353,9 @@ export const personaVersions = sqliteTable('persona_versions', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   /** Raw persona text, `{{tag}}` placeholders intact. */
   content: text('content').notNull(),
-  source: text('source', { enum: ['migrated', 'set', 'undo', 'default'] }).notNull(),
+  // 'claude' = an evaluated revision inserted directly on prod; 'bench' = a replay-harness override
+  // (scratch DBs only). Neither goes through persona.ts, and the column has no CHECK constraint.
+  source: text('source', { enum: ['migrated', 'set', 'undo', 'default', 'claude', 'bench'] }).notNull(),
   /** Epoch milliseconds. */
   createdAt: integer('created_at')
     .notNull()

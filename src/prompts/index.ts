@@ -239,7 +239,7 @@ export function scheduleClause(userName: string, slot: { text: string; until: st
  * **From 24h it says "an earlier day" — no number** (2026-10-03). The August nag test above ran on
  * gaps of hours; on real multi-day returns the number was the trigger: "about 6 days ago" in the
  * final instruction is the most salient fact in the prompt, and she quoted it back as reproach
- * ("six days, kirill. six."). 5 return turns × 4 samples: guilt/hurt replies 60% → 30%, day-count
+ * ("six days. six."). 5 return turns × 4 samples: guilt/hurt replies 60% → 30%, day-count
  * quotes 65% → 25%. Staleness is all the clause has to convey; the hour-scale wording that fixed
  * the "you're actually working" misreads is unchanged.
  * Used by generate.ts:withReplyCue.

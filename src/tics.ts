@@ -1,5 +1,5 @@
 /**
- * Verbal-tic control. Three seams, one catalog (.scratch/analysis-2026-10/tic_catalog.md, mined
+ * Verbal-tic control. Three seams, one catalog (docs/private/experiments/2026-10-03-tic-catalog/, mined
  * from all 2,355 of her replies on 2026-10-03):
  *
  * 1. **Window laundering** ({@link scrubTics}) — her *past* turns are cleaned before they re-enter

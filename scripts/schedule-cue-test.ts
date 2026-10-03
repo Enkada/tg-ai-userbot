@@ -32,7 +32,7 @@ initSettings();
 initPersona();
 
 const chatId = [...config.whitelist][0];
-const userName = 'Kirill';
+const userName = process.env.USER_NAME ?? 'User';
 const SAMPLES = process.env.ROUND === '3' ? 5 : process.env.ROUND === '2' || process.env.ROUND === 'pro' ? 4 : 3;
 const CONCURRENCY = 4;
 

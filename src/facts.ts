@@ -58,7 +58,7 @@ function renderFactsPrompt(chatId: number, userName: string): string {
   return substitute(FACTS_PASS, { userName, chatId }, new Date());
 }
 
-/** `[12] (work, learned 2026-07-03) Kirill works at …` — the fact list as the diff pass sees it. */
+/** `[12] (work, learned 2026-07-03) {{user}} works at …` — the fact list as the diff pass sees it. */
 function renderFactList(rows: FactRow[]): string {
   if (rows.length === 0) return FACTS_EMPTY_LIST;
   return rows

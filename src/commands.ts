@@ -468,13 +468,13 @@ register({
  * Undealt reroll angles per message row, so a spree walks the whole list before repeating one.
  *
  * Dealing without replacement (rather than rolling independently each time) is deliberate: real
- * sprees run 7-14 rerolls deep, and independent draws from 9 angles would repeat one inside a
+ * sprees run 7-14 rerolls deep, and independent draws from a handful of angles would repeat one inside a
  * single spree — which is the attractor problem being fixed. Keyed by `messages.id`; an entry is
  * only ever a few strings and is dropped once the reply is accepted, so the map stays tiny.
  */
 const rerollAngleBag = new Map<number, string[]>();
 
-/** Next unused angle for this message, reshuffling once all nine have been dealt. */
+/** Next unused angle for this message, reshuffling once all of them have been dealt. */
 function nextRerollAngle(messageId: number): string {
   let bag = rerollAngleBag.get(messageId);
   if (!bag || bag.length === 0) {
