@@ -73,6 +73,15 @@ function parseCsv(raw: string | undefined): string[] {
     .filter((part) => part.length > 0);
 }
 
+/** `CHAT_COMMANDS`: null = every command enabled; otherwise the set of enabled primary names. */
+function parseChatCommands(raw: string | undefined): Set<string> | null {
+  const value = raw?.trim().toLowerCase() ?? '';
+  if (value === '' || value === 'all') return null;
+  if (value === 'none') return new Set();
+  // Names are validated against the registry at startup (commands.ts) — a typo throws there.
+  return new Set(parseCsv(value).map((name) => name.replace(/^\//, '')));
+}
+
 /**
  * Reads a boolean env var. Accepts true/1/yes/on and false/0/no/off (case-insensitive);
  * unset/empty falls back, anything else throws so a typo fails loudly at startup.
@@ -96,6 +105,13 @@ export const config = {
   whitelist: new Set(parseIdList(process.env.WHITELIST)),
   sessionPath: process.env.SESSION_PATH ?? 'data/userbot.session',
   dbPath: process.env.DB_PATH ?? 'data/userbot.db',
+  /**
+   * Which slash commands work in the chat: `all` (default), `none`, or a comma list of command
+   * names (`status,stop`). A disabled command isn't intercepted at all — its text reaches her as
+   * an ordinary message. The operator surface lives outside the conversation (panel / agent), so
+   * prod runs `none`: no rerolls, no deletes, what's said stays said.
+   */
+  chatCommands: parseChatCommands(process.env.CHAT_COMMANDS),
   /**
    * Optional proxy for the MTProto connection, used where Telegram's data centres are
    * blocked at the network level. Accepts any URL understood by

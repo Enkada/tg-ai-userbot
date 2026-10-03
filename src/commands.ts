@@ -159,11 +159,25 @@ export function resolveCommand(name: string): Command | undefined {
   return commands.get(name) ?? commands.get(aliases.get(name) ?? '');
 }
 
+/**
+ * Whether `/name` (primary or alias) is a command the chat may use under CHAT_COMMANDS. Unknown
+ * names count as enabled only when everything is — under a restricted set they're plain text too.
+ */
+export function isCommandEnabled(name: string): boolean {
+  const allowed = config.chatCommands;
+  if (allowed === null) return true;
+  const primary = resolveCommand(name)?.name;
+  if (primary === undefined) return false;
+  // The list may name a command by alias (`r`) as well as by its primary name.
+  return [...allowed].some((name) => resolveCommand(name)?.name === primary);
+}
+
 register({
   name: 'help',
   description: 'Show the list of available commands',
   handler: async ({ reply }) => {
     const list = [...commands.values()]
+      .filter((cmd) => isCommandEnabled(cmd.name))
       .map((cmd) => {
         const names = [cmd.name, ...(cmd.aliases ?? [])].map((n) => `\`/${n}\``).join(' ');
         return `${names} — ${cmd.description}`;
@@ -1332,4 +1346,10 @@ export function parseCommand(text: string): { name: string; args: string[]; rawA
   const name = head.split('@')[0].toLowerCase();
   const rawArgs = trimmed.slice(trimmed.indexOf(head) + head.length).trim();
   return { name, args: rest, rawArgs };
+}
+
+// CHAT_COMMANDS is checked once every command above is registered: an unknown name would
+// otherwise just silently disable nothing, so a typo fails loudly at startup like any bad env.
+for (const name of config.chatCommands ?? []) {
+  if (!resolveCommand(name)) throw new Error(`CHAT_COMMANDS: unknown command "${name}"`);
 }

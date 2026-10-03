@@ -43,6 +43,7 @@ import { dropPanel, showPanel } from './panel.js';
 import { getImgUpscale } from './settings.js';
 import { renderMarkdown } from './format.js';
 import { sanitize } from './sanitize.js';
+import { stripHardTics } from './tics.js';
 import { splitMessage } from './chunker.js';
 import { parseToolCall, stripToolCalls } from './tools.js';
 
@@ -430,7 +431,7 @@ export function savePng(buffer: Buffer): string | null {
  * tell the chunker exists to remove.
  */
 function cleanLine(text: string): string {
-  return splitMessage(sanitize(text)).join('\n');
+  return splitMessage(sanitize(stripHardTics(text))).join('\n');
 }
 
 /**

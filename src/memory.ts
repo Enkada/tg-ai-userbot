@@ -27,6 +27,7 @@ import type { ProviderId } from './providers/types.js';
 import { PHOTO_SENT_ACK, photoRecord, photoRecordNumbered, searchRecord } from './prompts/index.js';
 import { sanitize } from './sanitize.js';
 import { getCharName } from './settings.js';
+import { scrubTics } from './tics.js';
 
 /** Minimum number of recent messages always kept in the context window. */
 export const MIN_WINDOW = 60;
@@ -217,6 +218,25 @@ export function conversationGapMs(chatId: number, now = Date.now()): number | nu
     if (now - row.at >= FRESH_MS) return now - row.at;
   }
   return null;
+}
+
+/**
+ * Her last `herN` replies and his last `hisN` messages, raw as stored (oldest first) — the input
+ * of the tic avoid-list (tics.ts:avoidListClause). Raw on purpose: the list measures what she
+ * actually produces, not the laundered window the model is shown.
+ */
+export function getRecentTexts(chatId: number, herN = 30, hisN = 12): { her: string[]; his: string[] } {
+  const take = (role: 'user' | 'assistant', n: number): string[] =>
+    db
+      .select({ content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.chatId, chatId), eq(messages.role, role), eq(messages.deleted, false)))
+      .orderBy(desc(messages.id))
+      .limit(n)
+      .all()
+      .map((r) => r.content)
+      .reverse();
+  return { her: take('assistant', herN), his: take('user', hisN) };
 }
 
 /** Epoch ms of the latest non-deleted *user* message in a chat, or null if there is none. */
@@ -541,6 +561,17 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
   }
 
   const userName = chatUserName(chatId);
+  // His message right before each of her replies — what the echo-opener scrub compares against.
+  // Reset after each reply, so a proactive opener (nothing of his in front) compares to nothing.
+  const prevUserOf = new Map<number, string>();
+  let lastUser = '';
+  for (const r of rows) {
+    if (r.role === 'user') lastUser = r.content;
+    else {
+      prevUserOf.set(r.id, lastUser);
+      lastUser = '';
+    }
+  }
   return rows.flatMap(({ id, role, content, createdAt, model, kind, proactive }) => {
     const meta = { id, at: createdAt, model: model ?? null, kind, proactive };
     const captions = captionsByMessage.get(id) ?? [];
@@ -550,7 +581,11 @@ export function getWindowDetailed(chatId: number): WindowMessage[] {
       // model input (see stripModelBrackets). A selfie row expands into the protocol turns
       // that produced it (tool call → [photo sent] → caption), so the window demonstrates
       // the correct call shape instead of a narrated record it would imitate.
-      const clean = stripModelBrackets(content);
+      // Her verbal tics are laundered out the same way (tics.ts:scrubTics): she imitates her own
+      // recent replies, so the examples she's shown decide what she repeats.
+      const clean = scrubTics(stripModelBrackets(content), prevUserOf.get(id));
+      // A reply that was nothing but absence reproach scrubs to '' — leave the turn out.
+      if (!clean && captions.length === 0 && searchList.length === 0) return [];
       if (captions.length > 0) {
         return renderSelfieWindowTurns(sanitize(clean), captions).map((t) => ({ ...t, ...meta }));
       }

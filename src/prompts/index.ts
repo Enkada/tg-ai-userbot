@@ -234,13 +234,21 @@ export function scheduleClause(userName: string, slot: { text: string; until: st
  * before — see the fourth-wall note on {@link scheduleClause}).
  *
  * Fires from 45 minutes (below that the conversation is simply live); hours round to the
- * nearest whole ("about an hour" under ~1.75h), days from 36h. Returns '' under the threshold.
+ * nearest whole ("about an hour" under ~1.75h). Returns '' under the threshold.
+ *
+ * **From 24h it says "an earlier day" — no number** (2026-10-03). The August nag test above ran on
+ * gaps of hours; on real multi-day returns the number was the trigger: "about 6 days ago" in the
+ * final instruction is the most salient fact in the prompt, and she quoted it back as reproach
+ * ("six days, kirill. six."). 5 return turns × 4 samples: guilt/hurt replies 60% → 30%, day-count
+ * quotes 65% → 25%. Staleness is all the clause has to convey; the hour-scale wording that fixed
+ * the "you're actually working" misreads is unchanged.
  * Used by generate.ts:withReplyCue.
  */
 export function gapHeadsUpClause(userName: string, gapMs: number): string {
   const h = gapMs / 3_600_000;
   if (h < 0.75) return '';
-  const label = h >= 36 ? `about ${Math.round(h / 24)} days` : h >= 1.75 ? `about ${Math.round(h)} hours` : 'about an hour';
+  if (h >= 24) return ` Heads up: ${userName}'s previous messages above are from an earlier day, not just now.`;
+  const label = h >= 1.75 ? `about ${Math.round(h)} hours` : 'about an hour';
   return ` Heads up: ${userName}'s previous messages above are from ${label} ago, not just now.`;
 }
 
@@ -288,21 +296,21 @@ export function rerollAngleCue(userName: string, angle: string): string {
  * exhausted — sprees run 7-14 deep in practice, and random draws would repeat an angle inside a
  * single spree, which is the problem being fixed.
  *
- * `get filthy about it` produces a hypothetical-physical-interaction line in ~2/25 samples (the
- * persona's "never describe hypothetical physical interactions" rule). It is kept deliberately:
- * the un-angled cue leaks the same way at 3/95, so the angle amplifies an existing hole rather
- * than opening one, and rewording it to "talk dirty to him" *doubled* the leak. Operator's call,
- * on the grounds that a reroll is one keystroke away.
+ * Cut 2026-10-03, after the angle-tagged rejects were read back against first passes:
+ * - `say what you want right now, unprompted` — 18/219 angled rejects were "come here / think about
+ *   me / i want you" vs 0/145 first passes. With no standing want of her own it reached for desire.
+ * - `react to how he sounds rather than to what he said` — "you sound X" at ~7× the first-pass rate,
+ *   and it literally told her to ignore what he wrote. She has no "sound" to read.
+ * - `ask him something about it instead of answering` — dodged his actual questions.
+ * - `get filthy about it` — intimacy is his move to make (persona v21), never a dice roll.
+ * The diversity experiment that chose the nine measured spread, not acceptance; what's left is the
+ * subset that stays an answer to him.
  */
 export const REROLL_ANGLES: readonly string[] = [
   `push back on part of it - you see it differently`,
   `tease him about it, let some air out of it`,
-  `ask him something about it instead of answering`,
-  `react to how he sounds rather than to what he said`,
   `be blunt - one short line, nothing softened`,
   `find the joke in it and riff`,
-  `get filthy about it`,
-  `say what you want right now, unprompted`,
   `drop the wry act and be sincere about it`,
 ];
 

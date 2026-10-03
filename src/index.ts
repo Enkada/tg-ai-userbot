@@ -1,7 +1,7 @@
 import { InputMedia, TelegramClient, proxyTransportFromUrl, type InputText, type Message } from '@mtcute/node';
 import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
-import { resolveCommand, parseCommand, type CommandContext } from './commands.js';
+import { isCommandEnabled, resolveCommand, parseCommand, type CommandContext } from './commands.js';
 import { dropPanel, showPanel, sweepDebris, trackDebris, untrackDebris } from './panel.js';
 import { activeProviderId, canCaptionImages, describeImage, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompts/render.js';
@@ -63,7 +63,7 @@ function handleMessage(msg: Message, selfName: string): void {
   // (It's text-only; a photo caption is never a command.) The aborted generation's own partial
   // path keeps and persists whatever bubbles already landed.
   const stopCmd = msg.text ? parseCommand(msg.text) : null;
-  if (stopCmd?.name === 'stop') {
+  if (stopCmd?.name === 'stop' && isCommandEnabled('stop')) {
     const stopped = stopInFlight(msg.chat.id);
     log.info(`/stop from ${senderId} — ${stopped ? 'aborted in-flight generation' : 'nothing in flight'}`);
     client.readHistory(msg.chat, { maxId: msg.id }).catch(() => {});
@@ -105,8 +105,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
     onUserActivity(chatId, userName);
     rememberUserName(chatId, userName);
   };
-  // A photo's caption is never treated as a slash command — commands are text-only.
-  const parsed = photo ? null : parseCommand(text);
+  // A photo's caption is never treated as a slash command — commands are text-only. A command
+  // disabled by CHAT_COMMANDS isn't one at all: its text goes to her like any other message.
+  const candidate = photo ? null : parseCommand(text);
+  const parsed = candidate && isCommandEnabled(candidate.name) ? candidate : null;
 
   if (parsed) {
     // Commands are control UI, not conversation: read instantly, no human pacing, and no

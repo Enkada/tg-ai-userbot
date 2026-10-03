@@ -15,6 +15,7 @@
 import { NO_ANSWER_FALLBACK, TOOLS_SCAFFOLD } from './prompts/index.js';
 import { isSearchConfigured } from './search.js';
 import { isSelfieAvailable } from './selfie.js';
+import { stripHardTics } from './tics.js';
 
 /** A tool the model may call via the pseudo protocol. */
 export interface ToolDef {
@@ -143,6 +144,8 @@ export function containsFakePhotoBlock(text: string): boolean {
  * builder cleans brackets out of what the model is later fed back (see memory.ts).
  */
 export function finalizeReply(content: string): string {
-  if (!parseToolCall(content)) return content.trim();
-  return stripToolCalls(content) || NO_ANSWER_FALLBACK;
+  // The outgoing tic guard runs here too, so the saved row matches what send.ts streamed out
+  // bubble by bubble (stripHardTics is local, so per-bubble and whole-text passes agree).
+  if (!parseToolCall(content)) return stripHardTics(content).trim();
+  return stripHardTics(stripToolCalls(content)) || NO_ANSWER_FALLBACK;
 }
