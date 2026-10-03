@@ -107,8 +107,8 @@ export const config = {
   dbPath: process.env.DB_PATH ?? 'data/userbot.db',
   /**
    * Which slash commands work in the chat: `all` (default), `none`, or a comma list of command
-   * names (`status,stop`). A disabled command isn't intercepted at all — its text reaches her as
-   * an ordinary message. The operator surface lives outside the conversation (panel / agent), so
+   * names (`status,stop`). A disabled command is still intercepted: it gets a short panel notice
+   * and is deleted, never reaching her. The operator surface lives outside the conversation (panel / agent), so
    * prod runs `none`: no rerolls, no deletes, what's said stays said.
    */
   chatCommands: parseChatCommands(process.env.CHAT_COMMANDS),

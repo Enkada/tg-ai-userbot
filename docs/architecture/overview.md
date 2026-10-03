@@ -51,7 +51,8 @@ flowchart TD
 ### 1. Gate (`handleMessage`)
 
 Outgoing messages, non-private chats and non-whitelisted senders are dropped before any queueing.
-`/stop` is handled here, **outside** the queue, when it's enabled by `CHAT_COMMANDS`. Queued, it
+`/stop` is handled here, **outside** the queue, when it's enabled by `CHAT_COMMANDS` (when it isn't,
+it's queued and gets the disabled-command notice). Queued, it
 would only run after the generation it's meant to interrupt. `stopInFlight` (`src/inflight.ts`)
 aborts the in-flight SSE request and flips the streamer's stop flag. Bubbles that already landed
 are kept and persisted by the generation's own partial-failure path.
@@ -64,9 +65,9 @@ racing a reply. Messages that arrive mid-generation (or during a selfie render) 
 
 ### 3. Command routing
 
-`parseCommand` only applies to text (a photo caption is never a command). A parsed command runs
-only if `isCommandEnabled(name)` passes. A disabled command is not a command at all: its text goes
-to the model like any other message. Enabled commands are read instantly, with no pacing. They
+`parseCommand` only applies to text (a photo caption is never a command). Every parsed command is
+intercepted; it runs only if `isCommandEnabled(name)` passes, otherwise it gets a panel notice and
+is deleted, never reaching the model. Commands are read instantly, with no pacing. They
 don't reset the proactive timer, and their output goes through the panel. See
 [control-plane.md](control-plane.md).
 

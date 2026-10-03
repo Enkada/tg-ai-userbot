@@ -1,7 +1,7 @@
 import { InputMedia, TelegramClient, proxyTransportFromUrl, type InputText, type Message } from '@mtcute/node';
 import { config, isWhitelisted } from './config.js';
 import { createLogger } from './logger.js';
-import { isCommandEnabled, resolveCommand, parseCommand, type CommandContext } from './commands.js';
+import { disabledCommandNotice, isCommandEnabled, resolveCommand, parseCommand, type CommandContext } from './commands.js';
 import { dropPanel, showPanel, sweepDebris, trackDebris, untrackDebris } from './panel.js';
 import { activeProviderId, canCaptionImages, describeImage, initProvider } from './llm.js';
 import { renderSystemPrompt } from './prompts/render.js';
@@ -105,10 +105,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
     onUserActivity(chatId, userName);
     rememberUserName(chatId, userName);
   };
-  // A photo's caption is never treated as a slash command — commands are text-only. A command
-  // disabled by CHAT_COMMANDS isn't one at all: its text goes to her like any other message.
-  const candidate = photo ? null : parseCommand(text);
-  const parsed = candidate && isCommandEnabled(candidate.name) ? candidate : null;
+  // A photo's caption is never treated as a slash command — commands are text-only. Every slash
+  // message is intercepted here, enabled or not: a command disabled by CHAT_COMMANDS gets a short
+  // panel notice and is deleted like any command, so it never reaches her or her memory.
+  const parsed = photo ? null : parseCommand(text);
 
   if (parsed) {
     // Commands are control UI, not conversation: read instantly, no human pacing, and no
@@ -137,7 +137,10 @@ async function processMessage(msg: Message, senderId: number, selfName: string):
 
     const command = resolveCommand(parsed.name);
     try {
-      if (!command) {
+      if (!isCommandEnabled(parsed.name)) {
+        log.info(`Disabled command /${parsed.name} from ${senderId}`);
+        await reply(disabledCommandNotice(parsed.name));
+      } else if (!command) {
         await reply(`Unknown command: /${parsed.name}. Try /help`);
       } else {
         const ctx: CommandContext = {

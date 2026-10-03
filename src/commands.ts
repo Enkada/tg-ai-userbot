@@ -161,7 +161,7 @@ export function resolveCommand(name: string): Command | undefined {
 
 /**
  * Whether `/name` (primary or alias) is a command the chat may use under CHAT_COMMANDS. Unknown
- * names count as enabled only when everything is — under a restricted set they're plain text too.
+ * names count as enabled only when everything is — under a restricted set they get the disabled notice.
  */
 export function isCommandEnabled(name: string): boolean {
   const allowed = config.chatCommands;
@@ -170,6 +170,16 @@ export function isCommandEnabled(name: string): boolean {
   if (primary === undefined) return false;
   // The list may name a command by alias (`r`) as well as by its primary name.
   return [...allowed].some((name) => resolveCommand(name)?.name === primary);
+}
+
+/**
+ * Panel text for a command that CHAT_COMMANDS switches off. The command message itself is deleted
+ * and the notice sweeps away with the next normal message, so nothing of it stays in the chat.
+ */
+export function disabledCommandNotice(name: string): string {
+  const allowed = [...(config.chatCommands ?? [])].map((n) => `/${resolveCommand(n)?.name ?? n}`);
+  const enabled = allowed.length ? `Enabled: ${allowed.join(', ')}.` : 'All commands are off (CHAT_COMMANDS=none).';
+  return `/${name} is disabled here. ${enabled} Nothing was sent to her.`;
 }
 
 register({

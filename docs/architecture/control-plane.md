@@ -4,8 +4,8 @@ Slash commands are typed into the same DM the companion lives in. They're contro
 conversation: no human pacing, no proactive-timer reset, and their output never enters the
 model's context.
 
-**Prod currently runs `CHAT_COMMANDS=none`.** Every slash command reaches her as plain text. No
-rerolls, no deletes: what's said stays said. The operator surface lives outside the chat.
+**Prod currently runs `CHAT_COMMANDS=none`.** Every slash command is intercepted, deleted and answered
+with a short panel notice; none reach her. No rerolls, no deletes: what's said stays said. The operator surface lives outside the chat.
 
 ## `CHAT_COMMANDS`
 
@@ -18,9 +18,12 @@ Parsed in `src/config.ts` (`parseChatCommands`), enforced by `isCommandEnabled()
 | `none` | no command is enabled |
 | `status,stop,r` | only these. Names are case-insensitive, a leading `/` is allowed, and aliases count (`r` enables `/reroll` and therefore `/r` too) |
 
-- **Disabled means plain text.** A disabled or unknown command isn't intercepted at all; the
-  message goes through the normal reply pipeline. Under a restricted list, an unknown `/foo` is
-  plain text as well.
+- **Disabled means intercepted, not executed.** Any message starting with `/` is treated as a
+  command. A disabled (or, under a restricted list, unknown) command gets a panel notice
+  (`disabledCommandNotice`: "/x is disabled here… Nothing was sent to her."), the command message is
+  revoked, and the notice is swept by the next normal message. It never reaches the model or the DB.
+  (Until 2026-10-03 a disabled command fell through to her as plain text; that leaked commands into
+  the conversation.)
 - **Startup validation.** After all commands are registered, every name in the list must
   resolve to a command or alias. A typo throws at boot (`CHAT_COMMANDS: unknown command "…"`).
 - `/help` lists only enabled commands.

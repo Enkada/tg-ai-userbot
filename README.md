@@ -40,8 +40,8 @@ chats.
 - **Diary channel.** One to three posts a day to a private channel, written in her voice.
   Implemented, **disabled by default** (`DIARY_ENABLED=false`).
 - **Chat commands** (`/status`, `/reroll`, `/dump`, `/facts`, …) with self-cleaning output, gated
-  by `CHAT_COMMANDS` (`all`, `none`, or a list). With commands disabled, their text reaches her as
-  ordinary messages.
+  by `CHAT_COMMANDS` (`all`, `none`, or a list). A disabled command is deleted and answered
+  with a short notice; it never reaches her.
 - **Two LLM backends.** A local llama.cpp server is used if it is reachable at startup;
   otherwise OpenRouter. Side passes (summaries, facts, booru tags, diary, caption fallback) always
   go through OpenRouter.

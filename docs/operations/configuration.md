@@ -24,7 +24,7 @@ their keys are set. Variables marked † are read by `config.ts` but missing fro
 | `SESSION_PATH` | `data/userbot.session` | mtcute session storage, created by `pnpm login` |
 | `DB_PATH` | `data/userbot.db` | SQLite database (directory created if missing) |
 | `PROXY_URL` | unset | Proxy for the MTProto connection: `socks5://`, `http://`, or an MTProxy `https://t.me/proxy?...` link. When it's `http(s)://`, it's also used for OpenRouter and Tavily calls |
-| `CHAT_COMMANDS` | `all` | `all`, `none`, or a comma list of command names/aliases. Disabled commands reach her as plain text. See [control-plane.md](../architecture/control-plane.md) |
+| `CHAT_COMMANDS` | `all` | `all`, `none`, or a comma list of command names/aliases. Disabled commands are intercepted with a panel notice and never reach her. See [control-plane.md](../architecture/control-plane.md) |
 | `TIMEZONE` | `Europe/Moscow` | IANA zone, assigned to `process.env.TZ` before any `Date` is created. Drives the clock, `{{period}}`, logical days, schedule, proactive and diary windows |
 
 ## LLM: shared generation
