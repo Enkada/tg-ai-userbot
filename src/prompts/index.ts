@@ -57,7 +57,7 @@ export const TECHNICAL_LAYER = load(config.llm.technicalPromptPath);
  * Tool-protocol scaffold: the search-decision rule, call syntax and a worked example, with a
  * `{{tools}}` tag filled with the available-tools list. Used by tools.ts:renderToolsBlock.
  *
- * NOTE: the call syntax this file describes is parsed by TOOL_CALL_RE in tools.ts — change
+ * NOTE: the call syntax this file describes is parsed in toolSyntax.ts — change
  * the protocol in one and you must change the other.
  */
 export const TOOLS_SCAFFOLD = load(config.llm.toolsPromptPath);

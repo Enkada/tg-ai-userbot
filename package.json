@@ -10,7 +10,8 @@
     "start": "tsx src/index.ts",
     "build": "tsc",
     "serve": "node dist/index.js",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "test": "tsx --test test/*.test.ts"
   },
   "keywords": [],
   "author": "",

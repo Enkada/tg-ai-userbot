@@ -25,6 +25,7 @@ import { SentenceSplitter, splitMessage } from './chunker.js';
 import { renderMarkdown } from './format.js';
 import { sanitize } from './sanitize.js';
 import { stripHardTics } from './tics.js';
+import { TOOL_CALL_OPENERS } from './toolSyntax.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -34,18 +35,16 @@ function typingDelayMs(length: number): number {
   return Math.min(delayMaxMs, delayBaseMs + length * delayPerCharMs);
 }
 
-/** The marker that opens a tool call; a completion starting with it is control flow, not prose. */
-const TOOL_CALL_MARKER = '<tool_call>';
-
 /**
- * Markers that end the prose portion of a stream mid-reply. Only the tool-call tag is
- * suppressed — it's executed protocol output that belongs to the parser, never prose.
+ * Markers that end the prose portion of a stream mid-reply, and that mark a whole completion as
+ * control flow when it starts with one. Only tool-call openers (toolSyntax.ts) are suppressed —
+ * they're executed protocol output that belongs to the parser, never prose.
  * Model-written bracket blocks (e.g. a `[you sent a photo: …]` imitation) are deliberately
  * NOT suppressed: raw output stays visible in the chat and the DB (no silent censorship —
  * you should see what happened), and the window builder strips brackets from assistant
  * turns at prompt-build time so the mistake can't re-teach itself (see memory.ts).
  */
-const SUPPRESS_MARKERS = [TOOL_CALL_MARKER];
+const SUPPRESS_MARKERS: readonly string[] = TOOL_CALL_OPENERS;
 
 export class ReplyStreamer {
   private readonly splitter = new SentenceSplitter();
@@ -115,11 +114,12 @@ export class ReplyStreamer {
     this.pending += delta;
     const head = this.pending.trimStart();
     if (head.length === 0) return; // only whitespace so far
-    if (head.startsWith(TOOL_CALL_MARKER)) {
+    const lowerHead = head.toLowerCase();
+    if (SUPPRESS_MARKERS.some((m) => lowerHead.startsWith(m))) {
       this.decided = 'tool';
       return;
     }
-    if (TOOL_CALL_MARKER.startsWith(head)) return; // still could become the marker; wait
+    if (SUPPRESS_MARKERS.some((m) => m.startsWith(lowerHead))) return; // could still become an opener; wait
     // Anything else is prose: commit and flush what we buffered.
     this.decided = 'prose';
     const buffered = this.pending;

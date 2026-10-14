@@ -28,6 +28,7 @@ import { PHOTO_SENT_ACK, photoRecord, photoRecordNumbered, searchRecord } from '
 import { sanitize } from './sanitize.js';
 import { getCharName } from './settings.js';
 import { scrubTics } from './tics.js';
+import { stripToolCalls } from './toolSyntax.js';
 
 /** Minimum number of recent messages always kept in the context window. */
 export const MIN_WINDOW = 60;

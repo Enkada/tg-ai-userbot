@@ -51,6 +51,7 @@ pnpm start                   # tsx, no watch
 pnpm login                   # one-time interactive MTProto login (PowerShell, not Git Bash)
 pnpm db:generate             # drizzle migration after editing src/db/schema.ts (auto-applied at startup)
 npx tsc --noEmit -p .        # typecheck (covers src/ only; scripts/ aren't in tsconfig include)
+pnpm test                    # unit tests for pure modules (test/*.test.ts, node:test via tsx)
 ```
 
 ## Production ("prod")

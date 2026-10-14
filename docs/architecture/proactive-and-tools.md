@@ -90,12 +90,17 @@ line:
 | `web_search` | `query` | `TAVILY_API_KEY` set |
 | `send_selfie` | `prompt` | `RUNPOD_API_KEY` + `RUNPOD_ENDPOINT_ID` + `OPENROUTER_API_KEY` set |
 
-- `parseToolCall` returns the first well-formed call. Malformed JSON counts as plain text and is
-  sent as-is, on purpose, so a misbehaving model is visible.
-- `stripToolCalls` / `finalizeReply` remove well-formed calls before sending or saving.
-- The streamer suppresses tool-call passes and truncates prose at a mid-stream `<tool_call>`.
+- Parsing lives in `src/toolSyntax.ts`. A call is an opener (`<tool_call>`, or the rarer
+  `<tool_calls>` / `<tool_code>`) plus one balanced JSON object with a string `name`. The
+  closing tag is ignored: the model often mangles it (`</tool_calls>`, `</tool_code>`,
+  `</tool_called`…), and everything after the JSON object is dropped.
+- `stripToolCalls` / `finalizeReply` cut everything from the opener on, valid call or garbled,
+  so a raw tag never reaches the chat or the DB. A garbled call is logged and treated as no call.
+- The streamer suppresses tool-call passes and truncates prose at a mid-stream opener, so what's
+  stored matches what was streamed. The window builder also cuts calls out of older stored rows.
 - With no tools available, the tools block renders empty and the loop is a single call.
-- **If you change the tag format**, update both `tools.txt` and `TOOL_CALL_RE`.
+- **If you change the tag format**, update both `tools.txt` and `toolSyntax.ts`
+  (tests: `pnpm test`).
 
 ## Web search (`src/search.ts`)
 

@@ -188,7 +188,9 @@ const AVOID: readonly AvoidItem[] = [
   { label: `"i'm starting to think ..."`, re: /\bi'?m starting to\b/i, min: 3 },
   { label: '"you know what"', re: /\byou know what\b/i, min: 3 },
   { label: `"at least you're ..."`, re: /\bat least (?:you|you're|you've)\b/i, min: 3 },
-  { label: `opening with "so you're ..."`, re: /^so (?:you|you're|you've)\b/i, min: 2 },
+  // Any "so" opener, not just "so you…": with that listed she routed around it (Oct 6–8: 9 of 53
+  // replies opened "so i'm…", "oh, so i'm…", "okay, so…"). Replay baseline is ~3 in 60, so min 3.
+  { label: `opening with "so ..." / "oh so ..."`, re: /^(?:(?:oh|okay|ok|wait|alright|right),?\s+)?so\b(?!\s+(?:much|many|far)\b)/i, min: 3 },
   { label: `opening with "you're ..." (labeling him)`, re: /^you(?:'re|'ve)\b/i, min: 6 },
   { label: '"but hey / but sure / but fine" pivots', re: /\bbut (?:hey|sure|fine|whatever)\b/i, min: 3 },
   { label: '"instead of (just) ..."', re: /\binstead of\b/i, min: 4 },

@@ -16,6 +16,10 @@ import { NO_ANSWER_FALLBACK, TOOLS_SCAFFOLD } from './prompts/index.js';
 import { isSearchConfigured } from './search.js';
 import { isSelfieAvailable } from './selfie.js';
 import { stripHardTics } from './tics.js';
+import { createLogger } from './logger.js';
+import { locateToolCall } from './toolSyntax.js';
+
+const log = createLogger('tools');
 
 /** A tool the model may call via the pseudo protocol. */
 export interface ToolDef {
@@ -62,8 +66,8 @@ export function availableTools(): ToolDef[] {
  * the available-tools list. Returns '' when no tool is available, so the prompt is unchanged
  * then.
  *
- * NOTE: the call syntax the scaffold describes is parsed by TOOL_CALL_RE below — if you
- * change the <tool_call> protocol in one place, change it in the other.
+ * NOTE: the call syntax the scaffold describes is parsed in toolSyntax.ts — if you change the
+ * <tool_call> protocol in one place, change it in the other.
  */
 export function renderToolsBlock(tools: ToolDef[] = availableTools()): string {
   if (tools.length === 0) return '';
@@ -71,51 +75,7 @@ export function renderToolsBlock(tools: ToolDef[] = availableTools()): string {
   return TOOLS_SCAFFOLD.replace(/\{\{\s*tools\s*\}\}/g, list);
 }
 
-/** A parsed tool call from the model's output. */
-export interface ParsedToolCall {
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i;
-
-/**
- * Extracts the first well-formed `<tool_call>` from the model's output, or null. Returns
- * null both when there is no tag and when the tag's JSON is malformed — a malformed call
- * is therefore treated as ordinary text and sent to the user as-is (useful for debugging
- * a misbehaving model, by design).
- */
-export function parseToolCall(text: string): ParsedToolCall | null {
-  const m = text.match(TOOL_CALL_RE);
-  if (!m) return null;
-  try {
-    const parsed = JSON.parse(m[1]) as unknown;
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      typeof (parsed as { name?: unknown }).name === 'string'
-    ) {
-      const obj = parsed as { name: string; arguments?: unknown };
-      const args =
-        typeof obj.arguments === 'object' && obj.arguments !== null
-          ? (obj.arguments as Record<string, unknown>)
-          : {};
-      return { name: obj.name, arguments: args };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Removes every well-formed `<tool_call>…</tool_call>` block from text. Used only as a
- * safety net for the final reply when the model hit the per-turn search cap but still
- * emitted a call — so a raw tag never reaches the chat.
- */
-export function stripToolCalls(text: string): string {
-  return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
-}
+export { parseToolCall, stripToolCalls, type ParsedToolCall } from './toolSyntax.js';
 
 /**
  * A model-written imitation of the photo-record block ("[you sent a photo: …]") — the shape
@@ -133,11 +93,11 @@ export function containsFakePhotoBlock(text: string): boolean {
 }
 
 /**
- * Prepares a model reply for sending. If it contains a *valid* tool call (e.g. the search
- * loop hit its cap, or a context that executes the call separately), the call is stripped
- * so no raw tag reaches the chat — falling back to {@link NO_ANSWER_FALLBACK} if nothing remains. A
- * reply with no tag, or with a *malformed* tag, is returned unchanged (sent as-is, which
- * surfaces a misbehaving model for debugging by design).
+ * Prepares a model reply for sending. Anything from a tool-call opener on is cut (toolSyntax.ts):
+ * a valid call left over (the search loop hit its cap, or a context that executes the call
+ * separately) or a garbled one alike, so no raw tag reaches the chat — falling back to
+ * {@link NO_ANSWER_FALLBACK} if nothing remains. Garbled calls used to be sent as-is for
+ * debugging; the raw tags in the chat cost more than they showed, so they're logged instead.
  *
  * NOTE: bracketed `[…]` text (an echoed cue, a fake photo-record block) is deliberately NOT
  * stripped here — model output reaches the chat and the DB unrewritten; only the prompt
@@ -146,6 +106,8 @@ export function containsFakePhotoBlock(text: string): boolean {
 export function finalizeReply(content: string): string {
   // The outgoing tic guard runs here too, so the saved row matches what send.ts streamed out
   // bubble by bubble (stripHardTics is local, so per-bubble and whole-text passes agree).
-  if (!parseToolCall(content)) return stripHardTics(content).trim();
-  return stripHardTics(stripToolCalls(content)) || NO_ANSWER_FALLBACK;
+  const span = locateToolCall(content);
+  if (!span) return stripHardTics(content).trim();
+  if (!span.call) log.warn(`Dropped a garbled tool call: ${content.slice(span.start, span.start + 300)}`);
+  return stripHardTics(content.slice(0, span.start)).trim() || NO_ANSWER_FALLBACK;
 }
