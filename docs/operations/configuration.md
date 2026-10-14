@@ -60,6 +60,7 @@ Reasoning is always disabled in code: `enable_thinking: false` for llama.cpp, an
 | `OPENROUTER_APP_URL` | unset | Sent as `HTTP-Referer` |
 | `OPENROUTER_PROVIDER_ORDER` | *unset:* `deepinfra,google-vertex,cloudflare` | Preferred upstream providers, in order (chat and diary calls only). **Set but blank** means no order (OpenRouter decides). `.env.example` ships the Gemma-tuned list; change it when you change the model |
 | `OPENROUTER_ALLOW_FALLBACKS` | `true` | Allow providers outside the order list |
+| `OPENROUTER_PROVIDER_IGNORE` | *(empty)* | Providers never used, even as a fallback (chat and diary calls). For hosts that break a request setting on the current model, e.g. `atlas-cloud` ignores reasoning-off on V4 Flash |
 | `OPENROUTER_PROVIDER_SORT` | unset | `price`, `throughput` or `latency` for the rest |
 
 Side passes (summary, facts, booru, caption fallback) use their own slugs and send no provider

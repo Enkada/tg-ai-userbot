@@ -199,6 +199,12 @@ export const config = {
       providerSort: process.env.OPENROUTER_PROVIDER_SORT?.trim() || undefined,
       /** When true, fall back to other providers if the preferred ones are unavailable. */
       allowFallbacks: boolEnv('OPENROUTER_ALLOW_FALLBACKS', true),
+      /**
+       * Providers never to route to, even as a fallback. For hosts that misbehave on this model:
+       * on 2026-10-14 AtlasCloud ignored `reasoning: {enabled: false}` for V4 Flash and spent
+       * the budget on reasoning, returning empty replies.
+       */
+      providerIgnore: parseCsv(process.env.OPENROUTER_PROVIDER_IGNORE ?? ''),
     },
   },
   // ---- Streaming: deliver every reply as several chat bubbles instead of one block ----

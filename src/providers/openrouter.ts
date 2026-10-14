@@ -26,15 +26,17 @@ const dispatcher = getProxyDispatcher();
 /**
  * Upstream provider routing (the `provider` request field). `order` lists preferred
  * providers tried first in sequence; with `allow_fallbacks` true, OpenRouter then routes
- * to the rest if none are available. Returns undefined when no preference is configured,
+ * to the rest if none are available, except those in `ignore`. Returns undefined when no preference is configured,
  * so we send no `provider` field and get OpenRouter's default routing. Built once — config
  * is static.
  */
 function buildProviderRouting(): Record<string, unknown> | undefined {
-  const hasPreference = cfg.providerOrder.length > 0 || Boolean(cfg.providerSort);
+  const hasPreference =
+    cfg.providerOrder.length > 0 || Boolean(cfg.providerSort) || cfg.providerIgnore.length > 0;
   if (!hasPreference) return undefined;
   const routing: Record<string, unknown> = { allow_fallbacks: cfg.allowFallbacks };
   if (cfg.providerOrder.length) routing.order = cfg.providerOrder;
+  if (cfg.providerIgnore.length) routing.ignore = cfg.providerIgnore;
   if (cfg.providerSort) routing.sort = cfg.providerSort;
   return routing;
 }
