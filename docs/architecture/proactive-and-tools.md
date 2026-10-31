@@ -130,8 +130,9 @@ Pipeline, per picture:
 2. **Reply saved first**, then `runSelfieFlow` runs inside the same queue task, so messages that
    arrive meanwhile wait. The panel shows "📸 Making a picture…".
 3. **Caption line** generated in parallel (`selfieCaptionCue`).
-4. **Capacity check.** `assertCapacity()` reads the endpoint's `/health` and fails fast if every
-   worker is throttled. An unreachable `/health` or a scaled-to-zero endpoint doesn't block.
+4. **Worker scheduling.** `/health` is diagnostic only: scaled-down workers can appear throttled
+   and still wake on submission. The client lets `/run` trigger scheduling instead of rejecting
+   a generation based on the idle health snapshot.
 5. **Booru pass** (`proseToTags`). A cheap OpenRouter model (`SELFIE_MODEL`, low temperature,
    reasoning off) turns the prose into Danbooru tags using `prompts/passes/booru.txt`, whose
    `{{identity}}` / `{{outfit_*}}` tags are filled from `prompts/passes/booru-appearance.txt`.

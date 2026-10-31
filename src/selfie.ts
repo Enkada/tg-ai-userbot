@@ -269,22 +269,6 @@ async function cancelJob(jobId: string, reason: string): Promise<void> {
 }
 
 /**
- * Fail-fast capacity check before submitting: when the endpoint has workers but every one of
- * them is throttled (no GPU to run on — the EU-CZ-1 era failure mode), a submit would just
- * sit IN_QUEUE until the full timeout. Better a failure line in ~5 s than in 5 minutes. An
- * unreachable /health is NOT proof of no capacity, so it never blocks a try; neither does an
- * all-zero worker table (a scaled-to-zero endpoint spawns its first worker on submit).
- */
-async function assertCapacity(): Promise<void> {
-  const health = await endpointHealth();
-  if (!health) return;
-  const w = health.workers;
-  if (w.throttled > 0 && w.ready + w.idle + w.running + w.initializing === 0) {
-    throw new Error(`No GPU capacity right now: all ${w.throttled} worker(s) throttled`);
-  }
-}
-
-/**
  * Submits one workflow and polls until the job completes, fails, is aborted (`/stop` via
  * `signal`), or the wall-clock budget ({@link config.selfie.timeoutMs}) runs out — the budget
  * covers a cold worker's queue time. On timeout or abort the job is cancelled server-side so
@@ -392,7 +376,8 @@ export function selfieFailInfo(err: unknown): SelfieFailInfo {
 export async function generateSelfie(prose: string, signal?: AbortSignal): Promise<GeneratedSelfie> {
   const partial: SelfieFailInfo = {};
   try {
-    await assertCapacity();
+    // An idle endpoint can report only throttled workers and still wake on /run.
+    // Let submission trigger scheduling instead of rejecting that health snapshot.
     const tags = await proseToTags(prose, signal);
     partial.tags = tags;
     const upscaled = getImgUpscale();
