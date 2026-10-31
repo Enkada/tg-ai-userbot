@@ -147,7 +147,9 @@ Pipeline, per picture:
    until `COMPLETED`, a failure status, `/stop`, or the `SELFIE_TIMEOUT_MS` budget (default 300 s,
    which covers cold workers). On timeout or abort the job is cancelled via `/cancel/<id>`, and a
    failed cancel is logged because the job may still bill. Transient poll errors are retried; a
-   response with no `status` is fatal.
+   response with no `status` is fatal. An explicit `ENDPOINT_PAUSED` submission rejection triggers
+   one management update (min workers 0 / max workers 1), then bounded retries while that update
+   propagates. Transport errors and other rejections do not resubmit the job.
 8. **Send.** The PNG goes out as one photo message with the caption, saved under
    `SELFIE_PHOTOS_DIR`. The `messages` row holds the caption, the `attachments` row holds the
    prose (the window renders this as tool call → `[photo sent]` → caption), and `photo_gens`

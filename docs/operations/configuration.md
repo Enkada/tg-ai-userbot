@@ -154,6 +154,11 @@ routing.
 The feature exists only when `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID` **and** `OPENROUTER_API_KEY`
 are all set.
 
+A paused RunPod endpoint is reactivated on the next image request, with minimum workers 0 and
+maximum workers 1. The API key needs endpoint-management write access for this recovery. Only
+explicit paused rejections are retried; other failures never repeat a possibly accepted job.
+There are no periodic keepalive jobs, and RunPod's inactivity emails are not disabled.
+
 | Var | Default | What it does |
 |:--|:--|:--|
 | `RUNPOD_API_KEY` | unset | RunPod API key |

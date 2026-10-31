@@ -27,6 +27,8 @@ import { InputMedia, type InputPeerLike, type TelegramClient } from '@mtcute/nod
 import { fetch } from 'undici';
 import { config } from './config.js';
 import { createLogger } from './logger.js';
+import { getProxyDispatcher } from './proxyAgent.js';
+import { submitRunpodJob } from './runpodSubmit.js';
 import { activeProviderId, chat } from './llm.js';
 import { booruPass } from './providers/openrouter.js';
 import { getWindow, saveAttachment, saveMessage, savePhotoGen } from './memory.js';
@@ -288,16 +290,14 @@ async function runJob(
   execMs: number | undefined;
 }> {
   if (signal?.aborted) throw abortError('Selfie aborted before submit');
-  const submitRes = await fetch(`${runpodBase()}/run`, {
-    method: 'POST',
-    headers: runpodHeaders(),
-    body: JSON.stringify({ input: { workflow } }),
-    signal: AbortSignal.timeout(15_000),
+  const submitted = await submitRunpodJob({
+    endpointId: cfg.endpointId ?? '',
+    apiKey: cfg.runpodApiKey ?? '',
+    input: { workflow },
+    signal,
+    dispatcher: getProxyDispatcher(),
+    onResume: () => log.info('RunPod endpoint reactivated for an image request'),
   });
-  if (!submitRes.ok) {
-    throw new Error(`RunPod submit failed: HTTP ${submitRes.status} ${(await submitRes.text()).slice(0, 200)}`);
-  }
-  const submitted = (await submitRes.json()) as JobStatus;
   if (!submitted.id) throw new Error(`RunPod submit failed: ${JSON.stringify(submitted).slice(0, 200)}`);
   const jobId = submitted.id;
   onSubmit(jobId);
