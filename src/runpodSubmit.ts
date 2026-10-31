@@ -85,9 +85,9 @@ export async function submitRunpodJob(
 
   // The management API can acknowledge the change before the job API sees it.
   // Only repeat explicit paused rejections, with one PATCH and a bounded wait.
-  const deadline = Date.now() + 30_000;
-  for (let attempt = 0; attempt < 5 && Date.now() < deadline; attempt++) {
-    await wait(Math.min(2000, deadline - Date.now()), options.signal);
+  const deadline = Date.now() + 60_000;
+  for (let attempt = 0; attempt < 30 && Date.now() < deadline; attempt++) {
+    await wait(Math.max(0, Math.min(2000, deadline - Date.now())), options.signal);
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     const retried = await submit(Math.min(15_000, remaining));

@@ -40,11 +40,11 @@ test('management propagation can reject another submission without repeating the
   let patches = 0, submissions = 0;
   const result = await submitRunpodJob(options, async (_, init) => {
     if (init.method === 'PATCH') { patches++; return response(200, {}); }
-    return ++submissions < 3 ? response(409, paused) : response(200, { id: 'ready' });
+    return ++submissions < 8 ? response(409, paused) : response(200, { id: 'ready' });
   }, noWait);
   assert.equal(result.id, 'ready');
   assert.equal(patches, 1);
-  assert.equal(submissions, 3);
+  assert.equal(submissions, 8);
 });
 
 test('a permanently paused endpoint has bounded retries', async () => {
@@ -55,7 +55,7 @@ test('a permanently paused endpoint has bounded retries', async () => {
     return response(409, paused);
   }, noWait), /remained paused/);
   assert.equal(patches, 1);
-  assert.equal(submissions, 6);
+  assert.equal(submissions, 31);
 });
 
 test('unrelated HTTP errors never resume or repeat a possibly accepted submission', async () => {
