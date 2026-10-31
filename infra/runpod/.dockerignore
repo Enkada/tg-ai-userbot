@@ -1,0 +1,8 @@
+# Use a dedicated build context; never send application credentials or chat data.
+**
+!Dockerfile
+!models/
+!models/checkpoints/
+!models/checkpoints/waiIllustriousSDXL_v160.safetensors
+!models/loras/
+!models/loras/ramdomrot_v2_illustrious_locon-000009.safetensors

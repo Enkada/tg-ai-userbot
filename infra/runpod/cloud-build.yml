@@ -1,0 +1,33 @@
+name: Build private ComfyUI worker
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag for the private worker image
+        required: true
+        default: '20261031-v1'
+permissions:
+  contents: read
+concurrency:
+  group: comfyui-image-build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Package the pinned worker and models
+        env:
+          CHECKPOINT_URL: ${{ secrets.CHECKPOINT_URL }}
+          LORA_URL: ${{ secrets.LORA_URL }}
+          CHECKPOINT_AUTHORIZATION: ${{ secrets.CHECKPOINT_AUTHORIZATION }}
+          LORA_AUTHORIZATION: ${{ secrets.LORA_AUTHORIZATION }}
+          S3_DATE: ${{ secrets.S3_DATE }}
+          S3_CONTENT_SHA256: ${{ secrets.S3_CONTENT_SHA256 }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+          IMAGE: ${{ vars.IMAGE_REPOSITORY }}:${{ inputs.tag }}
+        run: bash build-cloud.sh
