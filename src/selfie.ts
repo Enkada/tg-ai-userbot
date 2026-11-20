@@ -229,6 +229,7 @@ export async function endpointHealth(): Promise<EndpointHealth | null> {
   try {
     const res = await fetch(`${runpodBase()}/health`, {
       headers: runpodHeaders(),
+      dispatcher: getProxyDispatcher(),
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
@@ -261,6 +262,7 @@ async function cancelJob(jobId: string, reason: string): Promise<void> {
     const res = await fetch(`${runpodBase()}/cancel/${jobId}`, {
       method: 'POST',
       headers: runpodHeaders(),
+      dispatcher: getProxyDispatcher(),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -314,6 +316,7 @@ async function runJob(
     try {
       const res = await fetch(`${runpodBase()}/status/${jobId}`, {
         headers: runpodHeaders(),
+        dispatcher: getProxyDispatcher(),
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) throw new Error(`status HTTP ${res.status}`);
